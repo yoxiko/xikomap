@@ -341,7 +341,9 @@ class Yoxiko:
         return target in self.blacklist_ips or port in self.blacklist_ports
 
     def print_banner(self):
-        print(" yoxiko - самописный сканер портов для WindowsOS \n ")
+        print(" yoxiko - продвинутый сканер портов для Windows")
+        print("=" * 60)
+        print("  Используйте только для легального тестирования!")
         print("=" * 60)
 
     def log(self, message, level="INFO"):
@@ -433,6 +435,7 @@ class Yoxiko:
     def smart_scan(self, target, port, protocol='tcp'):
         self.stats['ports_scanned'] += 1
         
+        # Проверка черного списка
         if self.is_blacklisted(target, port):
             return None
         
@@ -524,7 +527,7 @@ class Yoxiko:
         print(f" Порты: {len(ports)} порт(ов)")
         print(f" Протокол: {protocol.upper()}")
         print(f" Потоки: {self.max_threads}")
-        print(f" Таймаут: {self.timeout}с")
+        print(f"⏱  Таймаут: {self.timeout}с")
         print()
         
         all_results = []
@@ -637,58 +640,55 @@ def main():
     check_dependencies()
     
     parser = argparse.ArgumentParser(
-        description='yoxiko - сканер портов для Windows OS',
-        add_help=False
+        description='yoxiko - продвинутый сканер портов для Windows OS',
+        add_help=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  python yoxiko.py 192.168.1.1
+  python yoxiko.py -p 80,443,22 example.com
+  python yoxiko.py -u -o results.json 10.0.0.0/24
+  python yoxiko.py -p 1-1000 -T 4 -v --format csv -o scan.csv 192.168.1.0/24
+  python yoxiko.py --log scan.log -p top100 -o results.json 192.168.1.1-192.168.1.50
+
+Формат указания целей:
+  IP адрес: 192.168.1.1
+  Домен: example.com  
+  CIDR: 192.168.1.0/24
+  Диапазон: 192.168.1.1-192.168.1.100
+        """
     )
     
-    parser.add_argument('target', nargs='?', help='Цель сканирования')
-    
-    parser.add_argument('-p', '--ports', default='common', help='Порты для сканирования')
-    
+    parser.add_argument('target', nargs='?', help='Цель сканирования (IP, домен, CIDR или диапазон)')
+    parser.add_argument('-p', '--ports', default='common', 
+                       help='Порты для сканирования (common, top100, all, 80,443 или 1-100)')
     parser.add_argument('-o', '--output', help='Файл для сохранения результатов')
-    
-    parser.add_argument('--format', choices=['json', 'csv', 'txt'], default='json', help='Формат вывода')
-    
+    parser.add_argument('--format', choices=['json', 'csv', 'txt'], default='json',
+                       help='Формат вывода результатов (по умолчанию: json)')
+    parser.add_argument('-t', '--tcp', action='store_true', default=True,
+                       help='TCP сканирование (включено по умолчанию)')
     parser.add_argument('-u', '--udp', action='store_true', help='UDP сканирование')
-    
-    parser.add_argument('-T', '--timing', type=int, default=3, choices=range(0, 6), help='Скорость сканирования 0-5')
-    
-    parser.add_argument('--max-threads', type=int, default=200, help='Максимум потоков')
-    
-    parser.add_argument('--timeout', type=float, default=2.0, help='Таймаут подключения')
-    
-    parser.add_argument('--log', help='Файл для логов')
-    
+    parser.add_argument('-T', '--timing', type=int, default=3, choices=range(0, 6),
+                       help='Шаблон тайминга (0-5, где 5 самый быстрый)')
+    parser.add_argument('--max-threads', type=int, default=200,
+                       help='Максимальное количество потоков')
+    parser.add_argument('--timeout', type=float, default=2.0,
+                       help='Таймаут подключения в секундах')
+    parser.add_argument('--log', help='Файл для сохранения логов')
     parser.add_argument('-v', '--verbose', action='store_true', help='Подробный вывод')
-    
-    parser.add_argument('-h', '--help', action='store_true', help='Показать справку')
+    parser.add_argument('-h', '--help', action='store_true', help='Показать эту справку')
     
     args = parser.parse_args()
     
     if args.help or not args.target:
-        print("yoxiko - сканер портов")
-        print()
-        print("Использование: python yoxiko.py [цель] [опции]")
-        print()
-        print("Основные опции:")
-        print("  -p ПОРТЫ      Порты: common, top100, all, 80,443 или 1-100")
-        print("  -o ФАЙЛ       Сохранить результаты в файл")
-        print("  --format      Формат вывода: json, csv, txt")
-        print("  -u            UDP сканирование")
-        print("  -T 0-5        Скорость сканирования")
-        print("  -v            Подробный вывод")
-        print()
-        print("Примеры:")
-        print("  python yoxiko.py 192.168.1.1")
-        print("  python yoxiko.py -p 80,443,22 example.com")
-        print("  python yoxiko.py -u -o results.json 10.0.0.0/24")
+        parser.print_help()
         return
     
     protocol = 'tcp'
     if args.udp:
         protocol = 'udp'
         if args.tcp:
-            print("  Внимание: Указаны оба протокола, используется только UDP")
+            print("  Внимание: Указаны оба протокола, но сканирование будет только UDP. Используйте отдельные запуски для TCP и UDP.")
     
     scanner = Yoxiko(
         max_threads=args.max_threads,
@@ -708,9 +708,9 @@ def main():
         )
         
     except KeyboardInterrupt:
-        print("\n Сканирование прервано")
+        print("\n Сканирование прервано пользователем")
     except Exception as e:
-        print(f" Ошибка: {e}")
+        print(f" Критическая ошибка: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()

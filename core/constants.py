@@ -12,8 +12,8 @@ TIMING_TEMPLATES = {
     5: {'timeout': 0.5, 'threads': 300}  
 }
 
-ICS_PORTS = [502, 47808, 20000, 102, 2404, 4840]
-IOT_PORTS = [1883, 8883, 5683, 5684, 554, 8554]
+ICS_PORTS = [502, 102, 47808, 20000, 4840, 2404, 44818, 34962, 5555, 5094]
+IOT_PORTS = [1883, 8883, 5683, 5672, 554, 8554, 17754, 4123, 3478, 5349]
 
 PROTOCOL_SIGNATURES = {
     'modbus': {'ports': [502], 'response_patterns': [b'modbus']},
@@ -336,6 +336,8 @@ PORT_GROUPS = {
     'iot': [1883, 8883, 502, 20000],
     'gaming': [25565, 27015, 27016, 7777, 9987],
     'blockchain': [8333, 18333, 30303, 9333, 9999],
+    'ics': ICS_PORTS, 
+    'iot': IOT_PORTS,  
     'top100': list(range(1, 101)) + [443, 993, 995, 1723, 5060]
 }
 

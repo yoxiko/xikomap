@@ -1,4 +1,3 @@
-
 import json
 import csv
 import logging
@@ -22,15 +21,22 @@ class ScanResult:
     os_confidence: float = 0.0
     technologies: List[str] = None
     blockchain_info: Dict[str, Any] = None
+    additional_info: Dict[str, Any] = None  
     
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now().isoformat()
         if self.technologies is None:
             self.technologies = []
+        if self.additional_info is None: 
+            self.additional_info = {}
     
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        for key, value in result.items():
+            if isinstance(value, datetime):
+                result[key] = value.isoformat()
+        return result
     
     def get_description(self) -> str:
         return PROTOCOL_DESCRIPTIONS.get(self.service, PROTOCOL_DESCRIPTIONS['unknown'])
@@ -73,10 +79,23 @@ class ResultHandler:
         return sorted(set(r.target for r in self.results))
     
     def get_stats(self) -> Dict[str, Any]:
-        if self.stats['end_time'] and self.stats['start_time']:
+        stats = self.stats.copy()
+        
+        if stats['start_time'] and isinstance(stats['start_time'], datetime):
+            stats['start_time'] = stats['start_time'].isoformat()
+        
+        if stats['end_time'] and isinstance(stats['end_time'], datetime):
+            stats['end_time'] = stats['end_time'].isoformat()
+        
+        if (self.stats['end_time'] and self.stats['start_time'] and 
+            isinstance(self.stats['start_time'], datetime) and 
+            isinstance(self.stats['end_time'], datetime)):
+            
             duration = self.stats['end_time'] - self.stats['start_time']
-            self.stats['duration'] = duration
-        return self.stats.copy()
+            stats['duration_seconds'] = duration.total_seconds()
+            stats['duration'] = str(duration)
+        
+        return stats
     
     def start_scan(self):
         self.stats['start_time'] = datetime.now()
@@ -105,7 +124,13 @@ class ResultHandler:
             return False
     
     def _save_json(self, filename: str):
-        """Save results as JSON"""
+        
+        def datetime_serializer(obj):
+            """Custom JSON serializer for datetime objects"""
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Type {type(obj)} not serializable")
+        
         output = {
             'metadata': {
                 'scanner': 'Yoxiko Advanced',
@@ -117,19 +142,16 @@ class ResultHandler:
         }
         
         with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(output, f, indent=2, ensure_ascii=False)
+            json.dump(output, f, indent=2, ensure_ascii=False, default=datetime_serializer)
     
     def _save_csv(self, filename: str):
-        """Save results as CSV"""
         with open(filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            # Write header
             writer.writerow([
                 'Target', 'Port', 'Protocol', 'State', 'Service', 
-                'Confidence', 'Banner', 'Scan Type', 'OS', 'OS Confidence'
+                'Confidence', 'Banner', 'Scan Type', 'OS', 'OS Confidence', 'Timestamp'
             ])
             
-            # Write data
             for result in self.results:
                 writer.writerow([
                     result.target,
@@ -138,14 +160,14 @@ class ResultHandler:
                     result.state,
                     result.service,
                     f"{result.confidence:.2f}",
-                    result.banner[:100] if result.banner else '',  # Limit banner length
+                    result.banner[:100] if result.banner else '',
                     result.scan_type,
                     result.detected_os or '',
-                    f"{result.os_confidence:.1f}" if result.os_confidence else ''
+                    f"{result.os_confidence:.1f}" if result.os_confidence else '',
+                    result.timestamp
                 ])
     
     def _save_txt(self, filename: str):
-        """Save results as text"""
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("YOXIKO SCANNER - RESULTS\n")
             f.write("=" * 50 + "\n\n")
@@ -155,7 +177,6 @@ class ResultHandler:
             f.write(f"Open ports: {self.stats['open_ports']}\n")
             f.write(f"Hosts scanned: {self.stats['hosts_scanned']}\n\n")
             
-            # Group by target
             targets = self.get_unique_targets()
             for target in targets:
                 target_results = self.get_results_by_target(target)
@@ -184,7 +205,6 @@ class ResultHandler:
                     f.write("\n")
     
     def clear(self):
-        """Clear all results"""
         self.results.clear()
         self.stats = {
             'total_scanned': 0,

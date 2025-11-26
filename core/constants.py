@@ -12,7 +12,13 @@ TIMING_TEMPLATES = {
     5: {'timeout': 0.5, 'threads': 300}  
 }
 
+ICS_PORTS = [502, 47808, 20000, 102, 2404, 4840]
+IOT_PORTS = [1883, 8883, 5683, 5684, 554, 8554]
+
 PROTOCOL_SIGNATURES = {
+    'modbus': {'ports': [502], 'response_patterns': [b'modbus']},
+    'mqtt': {'ports': [1883, 8883], 'response_patterns': [b'MQTT']},
+    
     'http': {
         'ports': [80, 8080, 8000, 8008, 8081, 8888, 8443, 3000, 5000, 9000],
         'request': b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Yoxiko-Scanner/1.0\r\n\r\n",

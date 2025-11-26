@@ -17,9 +17,9 @@ __all__ = [
     'ProtocolDetector',
     'ServiceDetector',
     'TechnologyDetector',
-    'CMSFrameworkDetector',    # НОВЫЙ
-    'VersionDetector',         # НОВЫЙ
-    'ICSSCADADetector',        # НОВЫЙ  
-    'IoTDiscoverer',           # НОВЫЙ
-    'MLClassifier'             # НОВЫЙ
+    'CMSFrameworkDetector',
+    'VersionDetector', 
+    'ICSSCADADetector',
+    'IoTDiscoverer',
+    'MLClassifier'
 ]

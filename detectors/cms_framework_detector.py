@@ -629,6 +629,6 @@ class CMSFrameworkDetector:
             'cache_size': len(self.detection_cache)
         }
 
-def quick_cms_detect(target: str, port: int = 80, use_ssl: bool = False) -> Dict:
+def quick_cms_detect(target: str, port: int = 80, use_ssl: bool = False) -> Dict:   
     detector = CMSFrameworkDetector()
     return detector.detect_cms_frameworks(target, port, use_ssl=use_ssl)

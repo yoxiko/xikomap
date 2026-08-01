@@ -1,5 +1,10 @@
 import sys
+import os
 import json
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+
 from service_classifier import classify_service
 from cms_framework_detector import detect_cms
 

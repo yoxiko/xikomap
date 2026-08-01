@@ -1,7 +1,6 @@
 use crate::reporter::types::ScanReport;
 use serde_json;
 use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use thiserror::Error;
 use tracing::info;

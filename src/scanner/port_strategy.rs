@@ -10,6 +10,12 @@ pub enum PortStrategy {
     Custom(Vec<u16>),
 }
 
+impl Default for PortStrategy {
+    fn default() -> Self {
+        PortStrategy::Top100
+    }
+}
+
 impl PortStrategy {
     pub fn get_ports(&self) -> Vec<u16> {
         match self {

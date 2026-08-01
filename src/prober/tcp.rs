@@ -26,7 +26,7 @@ pub struct ProbeResult {
 pub async fn probe_port(ip: &str, port: u16, timeout_ms: u64) -> Result<ProbeResult, ProbeError> {
     let addr = format!("{}:{}", ip, port);
 
-    let stream = match timeout(Duration::from_millis(timeout_ms), TcpStream::connect(&addr)).await {
+    let mut stream = match timeout(Duration::from_millis(timeout_ms), TcpStream::connect(&addr)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             if e.kind() == io::ErrorKind::ConnectionRefused {
@@ -38,8 +38,6 @@ pub async fn probe_port(ip: &str, port: u16, timeout_ms: u64) -> Result<ProbeRes
     };
 
     let mut buf = vec![0u8; 4096];
-    let mut banner = String::new();
-    let mut protocol_guess = "tcp".to_string();
 
     let probe_payload = get_probe_payload(port);
 
@@ -48,10 +46,13 @@ pub async fn probe_port(ip: &str, port: u16, timeout_ms: u64) -> Result<ProbeRes
         let _ = stream.write_all(&probe_payload).await;
     }
 
+    let banner;
+    let protocol_guess;
+
     match timeout(Duration::from_millis(timeout_ms), stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => {
-            banner = String::from_utf8_lossy(&buf[..n]).to_string();
-            banner = banner.replace(['\r', '\n'], " ").trim().to_string();
+            let raw_banner = String::from_utf8_lossy(&buf[..n]).to_string();
+            banner = raw_banner.replace(['\r', '\n'], " ").trim().to_string();
             protocol_guess = guess_protocol(port, &banner);
         }
         _ => {
@@ -61,9 +62,11 @@ pub async fn probe_port(ip: &str, port: u16, timeout_ms: u64) -> Result<ProbeRes
                     protocol_guess = "http".to_string();
                 } else {
                     banner = "open (no banner)".to_string();
+                    protocol_guess = "http".to_string();
                 }
             } else {
                 banner = "open (stealth)".to_string();
+                protocol_guess = "tcp".to_string();
             }
         }
     }

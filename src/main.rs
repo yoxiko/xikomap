@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use xikomap::core::config::ScanConfig;
-use xikomap::python_bridge::run_python_detectors_batch;
 use xikomap::reporter::{JsonReporter, MarkdownReporter, ScanReport};
 use xikomap::scanner::{PortStrategy, ScanEngine};
 use xikomap::utils::logger::init_logger;

@@ -1,47 +1,29 @@
-use crate::detectors::http_probe::probe_http;
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use tokio::net::TcpStream;
-use tokio::time::timeout;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ScanResult {
-    pub ip: String,
-    pub port: u16,
-    pub protocol: String,
-    pub banner: String,
-    pub http_body: String,
-    pub http_headers: String,
+pub struct RateLimiter {
+    max_rate: Option<usize>,
+    last_packet: Instant,
 }
 
-pub async fn scan_single_port(ip: String, port: u16, timeout_ms: u64) -> Option<ScanResult> {
-    let addr = format!("{}:{}", ip, port);
-    let connect_result = timeout(
-        Duration::from_millis(timeout_ms),
-        TcpStream::connect(&addr),
-    ).await;
+impl RateLimiter {
+    pub fn new(max_rate: Option<usize>) -> Self {
+        Self {
+            max_rate,
+            last_packet: Instant::now(),
+        }
+    }
 
-    if let Ok(Ok(_stream)) = connect_result {
-        let mut banner = "Open".to_string();
-        let mut http_body = String::new();
-        let mut http_headers = String::new();
-
-        if port == 80 || port == 443 || port == 8080 || port == 8443 {
-            if let Some(probe) = probe_http(&ip, port).await {
-                http_body = probe.body_snippet;
-                http_headers = probe.headers;
-                banner = format!("HTTP {}", probe.status_code);
+    pub async fn wait(&mut self) {
+        if let Some(max) = self.max_rate {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.last_packet);
+            let min_interval = Duration::from_secs_f64(1.0 / (max as f64));
+            
+            if elapsed < min_interval {
+                sleep(min_interval - elapsed).await;
             }
         }
-
-        return Some(ScanResult {
-            ip,
-            port,
-            protocol: "tcp".to_string(),
-            banner,
-            http_body,
-            http_headers,
-        });
+        self.last_packet = Instant::now();
     }
-    None
 }

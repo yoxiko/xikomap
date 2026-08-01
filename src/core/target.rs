@@ -3,13 +3,23 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TargetError {
+    #[error("Failed to resolve hostname: {0}")]
+    ResolutionFailed(String),
+    #[error("Invalid target format: {0}")]
+    InvalidFormat(String),
+}
 
 pub struct TargetResolver {
     targets: Vec<IpAddr>,
+    excluded: Vec<IpNetwork>,
 }
 
 impl TargetResolver {
-    pub fn new(raw_targets: &[String], raw_exclusions: &[String]) -> Result<Self, String> {
+    pub fn new(raw_targets: &[String], raw_exclusions: &[String]) -> Result<Self, TargetError> {
         let mut targets = Vec::new();
         let mut excluded = Vec::new();
 
@@ -41,7 +51,7 @@ impl TargetResolver {
             } else {
                 let resolved = resolve_hostname(target);
                 if resolved.is_empty() {
-                    return Err(format!("Failed to resolve hostname: {}", target));
+                    return Err(TargetError::ResolutionFailed(target.to_string()));
                 }
                 targets.extend(resolved);
             }
@@ -54,7 +64,7 @@ impl TargetResolver {
         targets.sort();
         targets.dedup();
 
-        Ok(Self { targets })
+        Ok(Self { targets, excluded })
     }
 
     pub fn resolve(&self, randomize: bool) -> Vec<IpAddr> {
@@ -63,6 +73,10 @@ impl TargetResolver {
             resolved.shuffle(&mut thread_rng());
         }
         resolved
+    }
+
+    pub fn count(&self) -> usize {
+        self.targets.len()
     }
 }
 

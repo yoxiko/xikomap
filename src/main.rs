@@ -1,12 +1,18 @@
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::time::Instant;
+use tracing::{error, info, warn};
 use xikomap::core::config::ScanConfig;
 use xikomap::python_bridge::run_python_detectors_batch;
+use xikomap::reporter::{JsonReporter, MarkdownReporter, ScanReport};
 use xikomap::scanner::{PortStrategy, ScanEngine};
+use xikomap::utils::logger::init_logger;
+use xikomap::utils::signals::ShutdownHandler;
 
 #[derive(Parser, Debug)]
 #[command(name = "xikomap")]
-#[command(about = "High-performance hybrid network scanner")]
+#[command(about = "Professional hybrid network scanner")]
+#[command(version = "2.3.0")]
 struct Args {
     #[arg(index = 1)]
     target: String,
@@ -17,14 +23,14 @@ struct Args {
     #[arg(long, default_value = "500")]
     timeout: u64,
 
+    #[arg(long, default_value = "3")]
+    retries: u8,
+
     #[arg(short, long, default_value = "1000")]
     concurrency: usize,
 
     #[arg(long)]
     randomize: bool,
-
-    #[arg(short, long, default_value = "text")]
-    format: String,
 
     #[arg(short, long, default_value = "top100")]
     ports: String,
@@ -33,114 +39,104 @@ struct Args {
     custom_ports: Option<String>,
 
     #[arg(short, long)]
-    quiet: bool,
-}
+    verbose: bool,
 
-#[derive(Serialize, Deserialize, Debug)]
-struct DetectionResult {
-    ip: String,
-    port: u16,
-    protocol: String,
-    service: String,
-    cms: Option<String>,
+    #[arg(long)]
+    json_logs: bool,
+
+    #[arg(long, default_value = "")]
+    output: String,
+
+    #[arg(long)]
+    rate_limit: Option<usize>,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    
-    if !args.quiet {
-        eprintln!("[*] Initializing scan engine...");
-    }
-    
+    init_logger(args.verbose, args.json_logs);
+
+    info!("Starting Xikomap v{}", env!("CARGO_PKG_VERSION"));
+
+    let shutdown_handler = ShutdownHandler::new();
+    let shutdown_arc = std::sync::Arc::new(shutdown_handler);
+
     let target_list: Vec<String> = args.target.split(',').map(|s| s.trim().to_string()).collect();
     let exclude_list: Vec<String> = args.exclude.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string()).collect();
     let port_strategy = PortStrategy::from_str(&args.ports, args.custom_ports.as_deref());
 
-    let config = ScanConfig {
-        targets: target_list,
-        exclude: exclude_list,
-        timeout_ms: args.timeout,
-        concurrency: args.concurrency,
-        randomize: args.randomize,
-        port_strategy,
-    };
+    let config = ScanConfig::builder()
+        .targets(target_list)
+        .exclude(exclude_list)
+        .timeout_ms(args.timeout)
+        .retries(args.retries)
+        .concurrency(args.concurrency)
+        .randomize(args.randomize)
+        .port_strategy(port_strategy)
+        .rate_limit(args.rate_limit)
+        .build();
 
-    let engine = ScanEngine::new(config);
-    
-    if !args.quiet {
-        eprintln!("[*] Resolving targets and starting concurrent scan...");
-    }
+    let engine = ScanEngine::new(config, shutdown_arc.clone());
+
+    let start_time = Instant::now();
+    let ports_to_scan = args.ports.clone();
+    let target_name = args.target.clone();
 
     let scan_results = match engine.run().await {
         Ok(results) => results,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            error!("Scan failed: {}", e);
             std::process::exit(1);
         }
     };
 
+    let duration = start_time.elapsed().as_secs_f64();
+
     if scan_results.is_empty() {
-        eprintln!("[!] No open ports found on {}", args.target);
+        info!("No open ports found on {}", args.target);
         return;
     }
 
-    if !args.quiet {
-        eprintln!("[+] Found {} open port(s). Analyzing with Python detectors...", scan_results.len());
-    }
+    info!("Found {} open port(s) in {:.2}s", scan_results.len(), duration);
 
-    let json_payload = serde_json::to_string(&scan_results).expect("Failed to serialize ports");
-    let detection_results = match run_python_detectors_batch(&json_payload) {
-        Ok(results) => results,
-        Err(e) => {
-            if !args.quiet {
-                eprintln!("[!] Python detection failed: {}", e);
-                eprintln!("[*] Showing raw scan results instead:");
-            }
-            for res in scan_results {
-                println!("{}:{} [tcp] {}", res.ip, res.port, res.banner);
-            }
-            return;
-        }
-    };
-    
-    let detections: Vec<DetectionResult> = match serde_json::from_value(detection_results) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[!] Failed to parse detection results: {}", e);
-            for res in scan_results {
-                println!("{}:{} [tcp] {}", res.ip, res.port, res.banner);
-            }
-            return;
-        }
+    let total_ports = match ports_to_scan.as_str() {
+        "top10" => 10,
+        "top100" => 100,
+        "top1000" => 1000,
+        "web" => 10,
+        "database" => 10,
+        _ => scan_results.len(),
     };
 
-    match args.format.as_str() {
-        "json" => {
-            println!("{}", serde_json::to_string_pretty(&detections).unwrap());
-        }
-        "csv" => {
-            println!("ip,port,protocol,service,cms");
-            for d in detections {
-                let cms = d.cms.unwrap_or_else(|| "None".to_string());
-                println!("{},{},{},{},{}", d.ip, d.port, d.protocol, d.service, cms);
+    let report = ScanReport::new(
+        target_name,
+        scan_results.clone(),
+        total_ports,
+        duration,
+        args.concurrency,
+        args.timeout,
+        args.retries,
+    );
+
+    if !args.output.is_empty() {
+        let output_path = PathBuf::from(&args.output);
+        
+        if args.output.ends_with(".json") {
+            if let Err(e) = JsonReporter::generate(&report, &output_path) {
+                warn!("Failed to generate JSON report: {}", e);
             }
-        }
-        "xml" => {
-            println!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-            println!("<scan_results>");
-            for d in detections {
-                let cms = d.cms.unwrap_or_else(|| "None".to_string());
-                println!("  <host ip=\"{}\" port=\"{}\" protocol=\"{}\" service=\"{}\" cms=\"{}\" />", 
-                    d.ip, d.port, d.protocol, d.service, cms);
+        } else if args.output.ends_with(".md") {
+            if let Err(e) = MarkdownReporter::generate(&report, &output_path) {
+                warn!("Failed to generate Markdown report: {}", e);
             }
-            println!("</scan_results>");
-        }
-        _ => {
-            for d in detections {
-                let cms = d.cms.map(|c| format!(" (CMS: {})", c)).unwrap_or_default();
-                println!("{}:{} [{}] {}{}", d.ip, d.port, d.protocol, d.service, cms);
-            }
+        } else {
+            warn!("Unsupported output format. Use .md or .json");
         }
     }
+
+    println!("\n=== SCAN RESULTS ===");
+    for res in &scan_results {
+        println!("{}:{} [{}] {}", res.ip, res.port, res.protocol, res.banner);
+    }
+    println!("\nTotal: {} open ports | Duration: {:.2}s", scan_results.len(), duration);
 }

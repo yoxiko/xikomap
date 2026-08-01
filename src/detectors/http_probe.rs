@@ -7,23 +7,24 @@ pub struct HttpProbeResult {
     pub body_snippet: String,
 }
 
-pub async fn probe_http(ip: &str, port: u16) -> Option<HttpProbeResult> {
+pub async fn probe_http(ip: &str, port: u16, timeout_ms: u64) -> Option<HttpProbeResult> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Duration::from_millis(timeout_ms))
         .build()
         .ok()?;
 
     let scheme = if port == 443 || port == 8443 { "https" } else { "http" };
     let url = format!("{}://{}:{}", scheme, ip, port);
-    
+
     if let Ok(response) = client.get(&url).send().await {
         let status = response.status().as_u16();
-        let headers = response.headers()
+        let headers = response
+            .headers()
             .iter()
             .map(|(k, v)| format!("{}: {}", k, v.to_str().unwrap_or("")))
             .collect::<Vec<_>>()
             .join("\n");
-        
+
         let body = response.text().await.unwrap_or_default();
         let body_snippet = body.chars().take(1000).collect();
 

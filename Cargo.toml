@@ -1,14 +1,27 @@
 [package]
 name = "xikomap"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
+authors = ["yoxiko"]
+description = "Professional hybrid network scanner built with Rust and Python"
+license = "MIT"
+repository = "https://github.com/yoxiko/xikomap"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35", features = ["full", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ipnetwork = "0.20"
 rand = "0.8"
 pyo3 = { version = "0.20", features = ["auto-initialize"] }
 reqwest = { version = "0.11", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ctrlc = "3.4"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+futures = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"

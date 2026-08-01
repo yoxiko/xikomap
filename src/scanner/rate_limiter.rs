@@ -30,7 +30,7 @@ impl RateLimiter {
         if let Some(min) = self.min_rate {
             let max_interval = Duration::from_secs_f64(1.0 / (min as f64));
             if elapsed > max_interval {
-                sleep(max_interval - elapsed).await;
+                sleep(Duration::from_millis(0)).await;
             }
         }
         

@@ -1,5 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::time::timeout;
 use xikomap::core::target::TargetResolver;
 use xikomap::python_bridge::run_python_detectors_batch;
 use xikomap::scanner::RateLimiter;
@@ -9,11 +11,14 @@ use xikomap::detectors::http_probe::probe_http;
 #[command(name = "xikomap")]
 #[command(about = "High-performance hybrid network scanner")]
 struct Args {
-    #[arg(short, long)]
-    targets: String,
+    #[arg(index = 1)]
+    target: String,
 
     #[arg(short, long, default_value = "")]
     exclude: String,
+
+    #[arg(long, default_value = "500")]
+    timeout: u64,
 
     #[arg(long)]
     min_rate: Option<usize>,
@@ -26,6 +31,15 @@ struct Args {
 
     #[arg(short, long, default_value = "text")]
     format: String,
+
+    #[arg(short, long, default_value = "top100")]
+    ports: String,
+
+    #[arg(long)]
+    custom_ports: Option<String>,
+
+    #[arg(short, long)]
+    quiet: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,26 +64,69 @@ struct DetectionResult {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let target_list: Vec<String> = args.targets.split(',').map(|s| s.trim().to_string()).collect();
+    
+    if !args.quiet {
+        eprintln!("[*] Resolving target: {}", args.target);
+    }
+    
+    let target_list: Vec<String> = args.target.split(',').map(|s| s.trim().to_string()).collect();
     let exclude_list: Vec<String> = args.exclude.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string()).collect();
 
-    let resolver = TargetResolver::new(&target_list, &exclude_list).expect("Failed to resolve targets");
+    let resolver = match TargetResolver::new(&target_list, &exclude_list) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
     let targets = resolver.resolve(args.randomize);
+    
+    if targets.is_empty() {
+        eprintln!("Error: No valid targets found.");
+        std::process::exit(1);
+    }
+
+    if !args.quiet {
+        eprintln!("[+] Resolved {} IP address(es)", targets.len());
+    }
 
     let mut rate_limiter = RateLimiter::new(args.min_rate, args.max_rate);
     let mut open_ports: Vec<PortInfo> = Vec::new();
 
-    let ports_to_scan = vec![21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 3306, 5432, 8080, 8443];
+    let port_strategy = xikomap::scanner::PortStrategy::from_str(&args.ports, args.custom_ports.as_deref());
+    let ports_to_scan = port_strategy.get_ports();
+    
+    if !args.quiet {
+        eprintln!("[*] Scanning {} port(s) per target (timeout: {}ms)", ports_to_scan.len(), args.timeout);
+    }
 
     for target in targets {
         let ip_str = target.to_string();
-        for port in &ports_to_scan {
+        
+        if !args.quiet {
+            eprintln!("[*] Scanning {}", ip_str);
+        }
+        
+        for (idx, port) in ports_to_scan.iter().enumerate() {
+            if !args.quiet && idx > 0 && idx % 20 == 0 {
+                eprint!(".");
+            }
+            
             rate_limiter.wait().await;
             let ip_clone = ip_str.clone();
             let port_clone = *port;
             
-            let result = tokio::net::TcpStream::connect(format!("{}:{}", ip_clone, port_clone)).await;
-            if result.is_ok() {
+            let connect_result = timeout(
+                Duration::from_millis(args.timeout),
+                tokio::net::TcpStream::connect(format!("{}:{}", ip_clone, port_clone))
+            ).await;
+            
+            if let Ok(Ok(_stream)) = connect_result {
+                if !args.quiet {
+                    eprint!("+");
+                }
+                
                 let mut banner = "Open".to_string();
                 let mut http_body = String::new();
                 let mut http_headers = String::new();
@@ -92,40 +149,71 @@ async fn main() {
                 });
             }
         }
+        if !args.quiet {
+            eprintln!();
+        }
     }
 
-    if !open_ports.is_empty() {
-        let json_payload = serde_json::to_string(&open_ports).expect("Failed to serialize ports");
-        let detection_results = run_python_detectors_batch(&json_payload).expect("Python batch processing failed");
-        
-        let detections: Vec<DetectionResult> = serde_json::from_value(detection_results).expect("Failed to parse detection results");
+    if open_ports.is_empty() {
+        eprintln!("[!] No open ports found on {}", args.target);
+        return;
+    }
 
-        match args.format.as_str() {
-            "json" => {
-                println!("{}", serde_json::to_string_pretty(&detections).unwrap());
+    if !args.quiet {
+        eprintln!("[*] Found {} open port(s), analyzing with Python detectors...", open_ports.len());
+    }
+
+    let json_payload = serde_json::to_string(&open_ports).expect("Failed to serialize ports");
+    let detection_results = match run_python_detectors_batch(&json_payload) {
+        Ok(results) => results,
+        Err(e) => {
+            if !args.quiet {
+                eprintln!("[!] Python detection failed (ensure py_detectors/ is in current directory): {}", e);
+                eprintln!("[*] Showing raw scan results instead:");
             }
-            "csv" => {
-                println!("ip,port,protocol,service,cms");
-                for d in detections {
-                    let cms = d.cms.unwrap_or_else(|| "None".to_string());
-                    println!("{},{},{},{},{}", d.ip, d.port, d.protocol, d.service, cms);
-                }
+            for port in open_ports {
+                println!("{}:{} [tcp] {}", port.ip, port.port, port.banner);
             }
-            "xml" => {
-                println!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-                println!("<scan_results>");
-                for d in detections {
-                    let cms = d.cms.unwrap_or_else(|| "None".to_string());
-                    println!("  <host ip=\"{}\" port=\"{}\" protocol=\"{}\" service=\"{}\" cms=\"{}\" />", 
-                        d.ip, d.port, d.protocol, d.service, cms);
-                }
-                println!("</scan_results>");
+            return;
+        }
+    };
+    
+    let detections: Vec<DetectionResult> = match serde_json::from_value(detection_results) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[!] Failed to parse detection results: {}", e);
+            for port in open_ports {
+                println!("{}:{} [tcp] {}", port.ip, port.port, port.banner);
             }
-            _ => {
-                for d in detections {
-                    let cms = d.cms.map(|c| format!(" (CMS: {})", c)).unwrap_or_default();
-                    println!("{}:{} [{}] {}{}", d.ip, d.port, d.protocol, d.service, cms);
-                }
+            return;
+        }
+    };
+
+    match args.format.as_str() {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&detections).unwrap());
+        }
+        "csv" => {
+            println!("ip,port,protocol,service,cms");
+            for d in detections {
+                let cms = d.cms.unwrap_or_else(|| "None".to_string());
+                println!("{},{},{},{},{}", d.ip, d.port, d.protocol, d.service, cms);
+            }
+        }
+        "xml" => {
+            println!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            println!("<scan_results>");
+            for d in detections {
+                let cms = d.cms.unwrap_or_else(|| "None".to_string());
+                println!("  <host ip=\"{}\" port=\"{}\" protocol=\"{}\" service=\"{}\" cms=\"{}\" />", 
+                    d.ip, d.port, d.protocol, d.service, cms);
+            }
+            println!("</scan_results>");
+        }
+        _ => {
+            for d in detections {
+                let cms = d.cms.map(|c| format!(" (CMS: {})", c)).unwrap_or_default();
+                println!("{}:{} [{}] {}{}", d.ip, d.port, d.protocol, d.service, cms);
             }
         }
     }

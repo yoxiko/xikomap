@@ -1,7 +1,7 @@
 use ipnetwork::IpNetwork;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 
 pub struct TargetResolver {
@@ -20,6 +20,11 @@ impl TargetResolver {
         }
 
         for target in raw_targets {
+            let target = target.trim();
+            if target.is_empty() {
+                continue;
+            }
+
             if target.contains('-') && !target.contains('/') {
                 let parts: Vec<&str> = target.split('-').collect();
                 if parts.len() == 2 {
@@ -33,12 +38,21 @@ impl TargetResolver {
                 targets.extend(net.iter());
             } else if let Ok(ip) = target.parse::<IpAddr>() {
                 targets.push(ip);
+            } else {
+                let resolved = resolve_hostname(target);
+                if resolved.is_empty() {
+                    return Err(format!("Failed to resolve hostname: {}", target));
+                }
+                targets.extend(resolved);
             }
         }
 
         targets.retain(|ip| {
             !excluded.iter().any(|net| net.contains(*ip))
         });
+
+        targets.sort();
+        targets.dedup();
 
         Ok(Self { targets })
     }
@@ -50,6 +64,17 @@ impl TargetResolver {
         }
         resolved
     }
+}
+
+fn resolve_hostname(hostname: &str) -> Vec<IpAddr> {
+    let mut ips = Vec::new();
+    if let Ok(addrs) = (hostname, 0).to_socket_addrs() {
+        for addr in addrs {
+            ips.push(addr.ip());
+        }
+    }
+    ips.dedup();
+    ips
 }
 
 fn generate_ip_range(start: IpAddr, end: IpAddr) -> Vec<IpAddr> {

@@ -1,30 +1,24 @@
-import re
-
-def detect_cms(target: str, port: int, banner: str) -> str:
-    if not banner:
-        return "unknown"
-    
-    banner_lower = banner.lower()
-    
-    if "wordpress" in banner_lower or "wp-content" in banner_lower or "wp-includes" in banner_lower:
-        return "wordpress"
-    
-    if "joomla" in banner_lower or "joomla!" in banner_lower:
-        return "joomla"
-    
-    if "drupal" in banner_lower or "x-drupal" in banner_lower:
-        return "drupal"
-    
-    if "magento" in banner_lower or "x-magento" in banner_lower:
-        return "magento"
-    
-    if "shopify" in banner_lower or "myshopify" in banner_lower:
-        return "shopify"
-    
-    if re.search(r"x-powered-by:\s*php", banner_lower):
-        return "php_backend"
+def detect_cms(port, banner, http_body, http_headers):
+    if port not in (80, 443, 8080, 8000, 8443):
+        return None
         
-    if re.search(r"x-powered-by:\s*asp\.net", banner_lower):
-        return "aspnet_backend"
-
-    return "unknown"
+    text_to_search = (http_body + http_headers + banner).lower()
+    
+    if "wordpress" in text_to_search or "wp-content" in text_to_search or "wp-includes" in text_to_search:
+        return "WordPress"
+    if "drupal" in text_to_search or "drupal.js" in text_to_search:
+        return "Drupal"
+    if "joomla" in text_to_search or "mosconfig" in text_to_search:
+        return "Joomla"
+    if "magento" in text_to_search or "mage/" in text_to_search:
+        return "Magento"
+    if "x-powered-by: asp.net" in text_to_search or ".aspx" in text_to_search:
+        return "ASP.NET"
+    if "x-powered-by: php" in text_to_search or "phpsessid" in text_to_search:
+        return "PHP"
+    if "nginx" in text_to_search:
+        return "Nginx"
+    if "apache" in text_to_search:
+        return "Apache"
+        
+    return None

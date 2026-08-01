@@ -1,175 +1,132 @@
 use clap::Parser;
-use std::time::Instant;
-
-mod core;
-mod scanner;
-mod detectors;
-mod python_bridge;
-
-use crate::core::target::resolve_targets;
-use crate::core::results::{ScanSummary, PortState};
-use crate::scanner::ping::ping_host;
-use crate::scanner::tcp_connect::scan_tcp_connect;
-use crate::scanner::udp_scan::scan_udp;
-use crate::detectors::banner::grab_banner;
-use crate::detectors::service::parse_service_version;
-use crate::python_bridge::run_python_detectors;
+use serde::{Deserialize, Serialize};
+use xikomap::core::target::TargetResolver;
+use xikomap::python_bridge::run_python_detectors_batch;
+use xikomap::scanner::RateLimiter;
+use xikomap::detectors::http_probe::probe_http;
 
 #[derive(Parser, Debug)]
 #[command(name = "xikomap")]
-#[command(about = "Professional network scanner")]
+#[command(about = "High-performance hybrid network scanner")]
 struct Args {
-    target: String,
-    #[arg(short = 'p', long)]
-    ports: Option<String>,
-    #[arg(short = 'F', long, default_value_t = false)]
-    fast: bool,
-    #[arg(long, default_value_t = false)]
-    all_ports: bool,
-    #[arg(short = 'T', long, default_value_t = 1000)]
-    threads: usize,
-    #[arg(long, default_value_t = 1000)]
-    timeout: u64,
-    #[arg(short = 'o', long = "full", default_value_t = false)]
-    full_output: bool,
-    #[arg(short = 'P', long, default_value_t = false)]
-    skip_ping: bool,
-    #[arg(short = 's', long, default_value = "T")]
-    scan_type: String,
+    #[arg(short, long)]
+    targets: String,
+
+    #[arg(short, long, default_value = "")]
+    exclude: String,
+
+    #[arg(long)]
+    min_rate: Option<usize>,
+
+    #[arg(long)]
+    max_rate: Option<usize>,
+
+    #[arg(long)]
+    randomize: bool,
+
+    #[arg(short, long, default_value = "text")]
+    format: String,
 }
 
-fn get_ports(args: &Args) -> Vec<u16> {
-    if args.all_ports {
-        return (1..=65535).collect();
-    }
-    
-    if args.fast {
-        return vec![
-            21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080
-        ];
-    }
+#[derive(Serialize, Deserialize, Debug)]
+struct PortInfo {
+    ip: String,
+    port: u16,
+    protocol: String,
+    banner: String,
+    http_body: String,
+    http_headers: String,
+}
 
-    if let Some(ports_str) = &args.ports {
-        let mut ports = Vec::new();
-        for part in ports_str.split(',') {
-            if part.contains('-') {
-                let range: Vec<&str> = part.split('-').collect();
-                let start: u16 = range[0].parse().unwrap();
-                let end: u16 = range[1].parse().unwrap();
-                ports.extend(start..=end);
-            } else {
-                ports.push(part.parse().unwrap());
-            }
-        }
-        return ports;
-    }
-
-    vec![80, 443, 8080]
+#[derive(Serialize, Deserialize, Debug)]
+struct DetectionResult {
+    ip: String,
+    port: u16,
+    protocol: String,
+    service: String,
+    cms: Option<String>,
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     let args = Args::parse();
-    println!("Starting xikomap 2.1.0 ( https://github.com/yoxiko/xikomap )");
-    
-    let targets = resolve_targets(&args.target).await?;
-    let ports = get_ports(&args);
-    
-    let start_time = Instant::now();
-    let mut summary = ScanSummary::new();
-    let target_count = targets.len();
-    let is_udp = args.scan_type.to_uppercase() == "U";
+    let target_list: Vec<String> = args.targets.split(',').map(|s| s.trim().to_string()).collect();
+    let exclude_list: Vec<String> = args.exclude.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().to_string()).collect();
 
-    for target_ip in &targets {
-        let target_str = target_ip.to_string();
-        println!("Scanning target: {}", target_str);
+    let resolver = TargetResolver::new(&target_list, &exclude_list).expect("Failed to resolve targets");
+    let targets = resolver.resolve(args.randomize);
 
-        let (is_up, latency_ms) = if args.skip_ping {
-            (true, 0.0)
-        } else {
-            ping_host(&target_str, args.timeout).await
-        };
+    let mut rate_limiter = RateLimiter::new(args.min_rate, args.max_rate);
+    let mut open_ports: Vec<PortInfo> = Vec::new();
 
-        if !is_up {
-            println!("Host seems down. If it is really up, but blocking our ping probes, try -P");
-            continue;
-        }
+    let ports_to_scan = vec![21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 3306, 5432, 8080, 8443];
 
-        println!("Host is up ({:.3}s latency).", latency_ms / 1000.0);
-
-        let port_results = if is_udp {
-            scan_udp(&target_str, ports.clone(), args.timeout, args.threads).await?
-        } else {
-            scan_tcp_connect(&target_str, ports.clone(), args.timeout, args.threads).await?
-        };
-
-        for port_res in port_results {
-            if port_res.state == PortState::Open && !is_udp {
-                let banner = grab_banner(&target_str, port_res.port, args.timeout).await;
-                let banner_str = banner.as_deref().unwrap_or("");
-                let version = parse_service_version(banner_str, port_res.port);
-                let service = run_python_detectors(&target_str, port_res.port, banner.as_deref());
-                
-                summary.add_result(
-                    target_str.clone(), 
-                    port_res.port, 
-                    port_res.state, 
-                    banner, 
-                    service, 
-                    version, 
-                    is_udp
-                );
-            } else {
-                summary.add_result(
-                    target_str.clone(), 
-                    port_res.port, 
-                    port_res.state, 
-                    None, 
-                    "unknown".to_string(), 
-                    "unknown".to_string(), 
-                    is_udp
-                );
-            }
-        }
-    }
-
-    let duration = start_time.elapsed();
-    println!("\nNmap done: {} IP address ({} host up) scanned in {:.2} seconds", 
-        target_count, 
-        summary.hosts.len(), 
-        duration.as_secs_f32()
-    );
-
-    if args.full_output {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
-    } else {
-        for host in &summary.hosts {
-            println!("\nNmap scan report for {}", host.ip);
-            println!("{:<8} {:<10} {:<15} {}", "PORT", "STATE", "SERVICE", "VERSION");
-            println!("{}", "-".repeat(55));
+    for target in targets {
+        let ip_str = target.to_string();
+        for port in &ports_to_scan {
+            rate_limiter.wait().await;
+            let ip_clone = ip_str.clone();
+            let port_clone = *port;
             
-            let mut filtered_count = 0;
-            for port_res in &host.ports {
-                if port_res.state == PortState::Filtered {
-                    filtered_count += 1;
-                    continue;
+            let result = tokio::net::TcpStream::connect(format!("{}:{}", ip_clone, port_clone)).await;
+            if result.is_ok() {
+                let mut banner = "Open".to_string();
+                let mut http_body = String::new();
+                let mut http_headers = String::new();
+
+                if port_clone == 80 || port_clone == 443 || port_clone == 8080 || port_clone == 8443 {
+                    if let Some(probe) = probe_http(&ip_clone, port_clone).await {
+                        http_body = probe.body_snippet;
+                        http_headers = probe.headers;
+                        banner = format!("HTTP {}", probe.status_code);
+                    }
                 }
-                
-                let proto = if port_res.is_udp { "udp" } else { "tcp" };
-                let state_str = format!("{:?}", port_res.state).to_lowercase();
-                println!("{:<8} {:<10} {:<15} {}", 
-                    format!("{}/{}", port_res.port, proto), 
-                    state_str, 
-                    port_res.service, 
-                    port_res.version
-                );
-            }
-            
-            if filtered_count > 0 {
-                println!("Not shown: {} filtered ports (no-response)", filtered_count);
+
+                open_ports.push(PortInfo {
+                    ip: ip_clone,
+                    port: port_clone,
+                    protocol: "tcp".to_string(),
+                    banner,
+                    http_body,
+                    http_headers,
+                });
             }
         }
     }
 
-    Ok(())
+    if !open_ports.is_empty() {
+        let json_payload = serde_json::to_string(&open_ports).expect("Failed to serialize ports");
+        let detection_results = run_python_detectors_batch(&json_payload).expect("Python batch processing failed");
+        
+        let detections: Vec<DetectionResult> = serde_json::from_value(detection_results).expect("Failed to parse detection results");
+
+        match args.format.as_str() {
+            "json" => {
+                println!("{}", serde_json::to_string_pretty(&detections).unwrap());
+            }
+            "csv" => {
+                println!("ip,port,protocol,service,cms");
+                for d in detections {
+                    let cms = d.cms.unwrap_or_else(|| "None".to_string());
+                    println!("{},{},{},{},{}", d.ip, d.port, d.protocol, d.service, cms);
+                }
+            }
+            "xml" => {
+                println!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+                println!("<scan_results>");
+                for d in detections {
+                    let cms = d.cms.unwrap_or_else(|| "None".to_string());
+                    println!("  <host ip=\"{}\" port=\"{}\" protocol=\"{}\" service=\"{}\" cms=\"{}\" />", 
+                        d.ip, d.port, d.protocol, d.service, cms);
+                }
+                println!("</scan_results>");
+            }
+            _ => {
+                for d in detections {
+                    let cms = d.cms.map(|c| format!(" (CMS: {})", c)).unwrap_or_default();
+                    println!("{}:{} [{}] {}{}", d.ip, d.port, d.protocol, d.service, cms);
+                }
+            }
+        }
+    }
 }

@@ -1,57 +1,65 @@
-use anyhow::Result;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
-use crate::core::results::PortState;
-use crate::scanner::ScanResult;
 
-pub async fn scan_udp(
-    target: &str,
-    ports: Vec<u16>,
-    timeout_ms: u64,
-    max_concurrent: usize,
-) -> Result<Vec<ScanResult>> {
-    let mut tasks = Vec::new();
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+pub enum UdpScanState {
+    Open,
+    Closed,
+    OpenOrFiltered,
+}
 
-    for port in ports {
-        let target_owned = target.to_string();
-        let sem_clone = Arc::clone(&semaphore);
-        let socket_clone = Arc::clone(&socket);
-        
-        let task = tokio::spawn(async move {
-            let _permit = sem_clone.acquire().await.unwrap();
-            let addr = format!("{}:{}", target_owned, port);
-            
-            let _ = socket_clone.send_to(b"\x00", &addr).await;
-            
-            let mut buf = [0u8; 1024];
-            let result = timeout(
-                Duration::from_millis(timeout_ms),
-                socket_clone.recv_from(&mut buf)
-            ).await;
+pub struct UdpScanResult {
+    pub ip: String,
+    pub port: u16,
+    pub state: UdpScanState,
+    pub response: Vec<u8>,
+}
 
-            let state = if result.is_ok() {
-                PortState::Open
-            } else {
-                PortState::Filtered
-            };
+pub async fn scan_udp_port(ip: &str, port: u16, timeout_ms: u64) -> UdpScanResult {
+    let addr = format!("{}:{}", ip, port);
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => {
+            return UdpScanResult {
+                ip: ip.to_string(),
+                port,
+                state: UdpScanState::OpenOrFiltered,
+                response: Vec::new(),
+            }
+        }
+    };
 
-            ScanResult { port, state }
-        });
-        
-        tasks.push(task);
-    }
+    let _ = socket.connect(&addr).await;
+    let payload = b"\x00";
 
-    let mut results = Vec::new();
-    for task in tasks {
-        if let Ok(res) = task.await {
-            results.push(res);
+    match timeout(Duration::from_millis(timeout_ms), socket.send(payload)).await {
+        Ok(Ok(_)) => {}
+        _ => {
+            return UdpScanResult {
+                ip: ip.to_string(),
+                port,
+                state: UdpScanState::OpenOrFiltered,
+                response: Vec::new(),
+            }
         }
     }
 
-    results.sort_by_key(|r| r.port);
-    Ok(results)
+    let mut buf = vec![0u8; 1024];
+    match timeout(Duration::from_millis(timeout_ms), socket.recv(&mut buf)).await {
+        Ok(Ok(size)) => {
+            buf.truncate(size);
+            UdpScanResult {
+                ip: ip.to_string(),
+                port,
+                state: UdpScanState::Open,
+                response: buf,
+            }
+        }
+        _ => UdpScanResult {
+            ip: ip.to_string(),
+            port,
+            state: UdpScanState::OpenOrFiltered,
+            response: Vec::new(),
+        },
+    }
 }

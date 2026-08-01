@@ -1,24 +1,20 @@
-use std::time::Instant;
-use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::time::timeout;
 
-pub async fn ping_host(target: &str, timeout_ms: u64) -> (bool, f64) {
-    let ping_ports = [80, 443, 22, 21];
+pub async fn check_host_alive(ip: &str, timeout_ms: u64) -> bool {
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let addr = format!("{}:{}", ip, 7);
+    let _ = socket.connect(&addr).await;
     
-    for port in ping_ports {
-        let addr = format!("{}:{}", target, port);
-        let start = Instant::now();
-        
-        let result = timeout(
-            Duration::from_millis(timeout_ms),
-            TcpStream::connect(&addr)
-        ).await;
-        
-        if result.is_ok() {
-            let latency = start.elapsed().as_secs_f64() * 1000.0;
-            return (true, latency);
-        }
-    }
-    
-    (false, 0.0)
+    let is_alive = match timeout(Duration::from_millis(timeout_ms), socket.send(b"ping")).await {
+        Ok(Ok(_)) => true,
+        _ => false,
+    };
+
+    is_alive
 }

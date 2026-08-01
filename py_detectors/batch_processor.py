@@ -11,7 +11,6 @@ from cms_framework_detector import detect_cms
 from technology_detector import TechnologyDetector
 from misconfiguration_detector import MisconfigurationDetector
 from ssl_tls_analyzer import SSLTLSAnalyzer
-from html_report import HTMLReportGenerator
 
 tech_detector = TechnologyDetector()
 misconfig_detector = MisconfigurationDetector()
@@ -77,14 +76,6 @@ def process_batch(input_data_str: str) -> str:
     }
     
     return json.dumps(output, default=str)
-
-def generate_html_report(scan_data_json: str, output_path: str):
-    try:
-        scan_data = json.loads(scan_data_json)
-        generator = HTMLReportGenerator()
-        generator.generate(scan_data, output_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to generate HTML: {e}")
 
 if __name__ == "__main__":
     input_json = sys.stdin.read()

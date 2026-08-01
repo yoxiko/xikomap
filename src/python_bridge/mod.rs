@@ -39,46 +39,9 @@ fn process_batch_py(json_payload: String) -> PyResult<String> {
     })
 }
 
-#[pyfunction]
-fn generate_html_report_py(scan_data_json: String, output_path: String) -> PyResult<()> {
-    Python::with_gil(|py| {
-        let current_dir = std::env::current_dir().map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Failed to get current dir: {}", e))
-        })?;
-
-        let py_detectors_path = current_dir.join("py_detectors");
-
-        if !py_detectors_path.exists() {
-            return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
-                "py_detectors directory not found",
-            ));
-        }
-
-        let sys = py.import("sys")?;
-        let py_path = sys.getattr("path")?;
-
-        if let Ok(path_list) = py_path.downcast::<pyo3::types::PyList>() {
-            let path_str = py_detectors_path.to_string_lossy().to_string();
-            path_list.insert(0, path_str)?;
-        }
-
-        let batch_processor = py.import("batch_processor")?;
-        batch_processor.call_method1("generate_html_report", (scan_data_json, output_path))?;
-        Ok(())
-    })
-}
-
 pub fn run_python_detectors_batch(json_payload: &str) -> Result<Value, PythonBridgeError> {
     let result_str = process_batch_py(json_payload.to_string())
         .map_err(|e| PythonBridgeError::ExecutionFailed(e.to_string()))?;
     let parsed: Value = serde_json::from_str(&result_str)?;
     Ok(parsed)
-}
-
-pub fn generate_html_report(scan_data: &Value, output_path: &str) -> Result<(), PythonBridgeError> {
-    let scan_data_json = serde_json::to_string(scan_data)
-        .map_err(|e| PythonBridgeError::JsonError(e))?;
-    
-    generate_html_report_py(scan_data_json, output_path.to_string())
-        .map_err(|e| PythonBridgeError::ExecutionFailed(e.to_string()))
 }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use xikomap::core::config::ScanConfig;
-use xikomap::python_bridge::{run_python_detectors_batch, generate_html_report};
+use xikomap::python_bridge::run_python_detectors_batch;
 use xikomap::reporter::{JsonReporter, MarkdownReporter, ScanReport};
 use xikomap::scanner::{PortStrategy, ScanEngine};
 use xikomap::utils::logger::init_logger;
@@ -48,7 +48,7 @@ struct Args {
     output: String,
 
     #[arg(short = 'x', long)]
-    html_report: bool,
+    extended: bool,
 
     #[arg(long)]
     rate_limit: Option<usize>,
@@ -130,13 +130,82 @@ async fn main() {
         }
     };
 
-    if args.html_report {
-        let html_path = format!("{}_report.html", target_name.replace(".", "_").replace("/", "_"));
-        let scan_data = serde_json::from_value(detection_results.clone()).unwrap_or_default();
+    if args.extended {
+        println!("\n============================================================");
+        println!(" EXTENDED SCAN RESULTS");
+        println!("============================================================");
         
-        match generate_html_report(&scan_data, &html_path) {
-            Ok(_) => info!("HTML report saved to: {}", html_path),
-            Err(e) => warn!("Failed to generate HTML report: {}", e),
+        if let Some(ports) = detection_results.get("ports") {
+            if let Some(ports_array) = ports.as_array() {
+                for port_info in ports_array {
+                    let ip = port_info["ip"].as_str().unwrap_or("N/A");
+                    let port = port_info["port"].as_u64().unwrap_or(0);
+                    let proto = port_info["protocol"].as_str().unwrap_or("tcp");
+                    let service = port_info["service"].as_str().unwrap_or("Unknown");
+                    let risk = port_info["risk_level"].as_str().unwrap_or("low");
+                    
+                    println!("\n[{}] {}:{} ({})", risk.to_uppercase(), ip, port, service.to_uppercase());
+                    println!("  Protocol : {}", proto);
+                    
+                    if let Some(techs) = port_info.get("technologies") {
+                        if let Some(tech_array) = techs.as_array() {
+                            if !tech_array.is_empty() {
+                                let tech_str: Vec<String> = tech_array.iter().filter_map(|t| t.as_str().map(String::from)).collect();
+                                println!("  Tech     : {}", tech_str.join(", "));
+                            }
+                        }
+                    }
+                    
+                    if let Some(orig) = scan_results.iter().find(|r| r.ip == ip && r.port as u64 == port) {
+                        println!("  Banner   : {}", orig.banner);
+                    }
+                }
+            }
+        }
+        
+        if let Some(misconfigs) = detection_results.get("misconfigurations") {
+            if let Some(mc_array) = misconfigs.as_array() {
+                if !mc_array.is_empty() {
+                    println!("\n------------------------------------------------------------");
+                    println!(" MISCONFIGURATIONS DETECTED");
+                    println!("------------------------------------------------------------");
+                    for mc in mc_array {
+                        let severity = mc["severity"].as_str().unwrap_or("unknown");
+                        let desc = mc["description"].as_str().unwrap_or("N/A");
+                        let rec = mc["recommendation"].as_str().unwrap_or("N/A");
+                        println!("  [{}] {}", severity.to_uppercase(), desc);
+                        println!("    -> Recommendation: {}", rec);
+                    }
+                }
+            }
+        }
+        
+        if let Some(ssl) = detection_results.get("ssl_analysis") {
+            if ssl.get("has_ssl").and_then(|v| v.as_bool()).unwrap_or(false) {
+                println!("\n------------------------------------------------------------");
+                println!(" SSL/TLS ANALYSIS");
+                println!("------------------------------------------------------------");
+                let risk = ssl["risk_level"].as_str().unwrap_or("unknown");
+                println!("  Risk Level : {}", risk.to_uppercase());
+                if let Some(prots) = ssl.get("protocols_supported").and_then(|v| v.as_array()) {
+                    let p: Vec<String> = prots.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                    println!("  Protocols  : {}", p.join(", "));
+                }
+                if let Some(recs) = ssl.get("recommendations").and_then(|v| v.as_array()) {
+                    println!("  Recommendations:");
+                    for rec in recs {
+                        if let Some(r) = rec.as_str() {
+                            println!("    - {}", r);
+                        }
+                    }
+                }
+            }
+        }
+        println!("============================================================\n");
+    } else {
+        println!("\n=== SCAN RESULTS ===");
+        for res in &scan_results {
+            println!("{}:{} [{}] {}", res.ip, res.port, res.protocol, res.banner);
         }
     }
 
@@ -156,9 +225,5 @@ async fn main() {
         }
     }
 
-    println!("\n=== SCAN RESULTS ===");
-    for res in &scan_results {
-        println!("{}:{} [{}] {}", res.ip, res.port, res.protocol, res.banner);
-    }
-    println!("\nTotal: {} open ports | Duration: {:.2}s", scan_results.len(), duration);
+    println!("Total: {} open ports | Duration: {:.2}s", scan_results.len(), duration);
 }

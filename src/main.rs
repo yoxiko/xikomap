@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{error, info, warn};
 use xikomap::core::config::ScanConfig;
+use xikomap::python_bridge::{run_python_detectors_batch, generate_html_report};
 use xikomap::reporter::{JsonReporter, MarkdownReporter, ScanReport};
 use xikomap::scanner::{PortStrategy, ScanEngine};
 use xikomap::utils::logger::init_logger;
@@ -45,6 +46,9 @@ struct Args {
 
     #[arg(long, default_value = "")]
     output: String,
+
+    #[arg(short = 'x', long)]
+    html_report: bool,
 
     #[arg(long)]
     rate_limit: Option<usize>,
@@ -108,7 +112,7 @@ async fn main() {
     };
 
     let report = ScanReport::new(
-        target_name,
+        target_name.clone(),
         scan_results.clone(),
         total_ports,
         duration,
@@ -116,6 +120,25 @@ async fn main() {
         args.timeout,
         args.retries,
     );
+
+    let json_payload = serde_json::to_string(&scan_results).expect("Failed to serialize");
+    let detection_results = match run_python_detectors_batch(&json_payload) {
+        Ok(results) => results,
+        Err(e) => {
+            warn!("Python detection failed: {}", e);
+            return;
+        }
+    };
+
+    if args.html_report {
+        let html_path = format!("{}_report.html", target_name.replace(".", "_").replace("/", "_"));
+        let scan_data = serde_json::from_value(detection_results.clone()).unwrap_or_default();
+        
+        match generate_html_report(&scan_data, &html_path) {
+            Ok(_) => info!("HTML report saved to: {}", html_path),
+            Err(e) => warn!("Failed to generate HTML report: {}", e),
+        }
+    }
 
     if !args.output.is_empty() {
         let output_path = PathBuf::from(&args.output);

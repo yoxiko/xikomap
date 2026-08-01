@@ -15,7 +15,6 @@ pub enum TargetError {
 
 pub struct TargetResolver {
     targets: Vec<IpAddr>,
-    excluded: Vec<IpNetwork>,
 }
 
 impl TargetResolver {
@@ -64,7 +63,7 @@ impl TargetResolver {
         targets.sort();
         targets.dedup();
 
-        Ok(Self { targets, excluded })
+        Ok(Self { targets })
     }
 
     pub fn resolve(&self, randomize: bool) -> Vec<IpAddr> {

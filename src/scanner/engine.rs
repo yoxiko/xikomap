@@ -1,90 +1,64 @@
-use crate::core::config::ScanConfig;
-use crate::core::target::TargetResolver;
-use crate::scanner::worker::{scan_port_with_retry, ScanResult};
-use crate::utils::signals::ShutdownHandler;
+use crate::core::target::{TargetError, TargetGenerator};
+use crate::prober::tcp::{probe_tcp, ProbeError};
+use crate::scanner::worker::{ScanResult, Worker};
 use futures::stream::{self, StreamExt};
-use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum ScanError {
-    #[error("Target resolution failed: {0}")]
-    TargetError(#[from] crate::core::target::TargetError),
-    #[error("Scan was interrupted")]
-    Interrupted,
+    #[error("Target error: {0}")]
+    Target(#[from] TargetError),
+    #[error("Probe error: {0}")]
+    Probe(#[from] ProbeError),
 }
 
-pub struct ScanEngine {
-    config: ScanConfig,
-    shutdown_handler: Arc<ShutdownHandler>,
+pub struct ScannerEngine {
+    concurrency: usize,
 }
 
-impl ScanEngine {
-    pub fn new(config: ScanConfig, shutdown_handler: Arc<ShutdownHandler>) -> Self {
-        Self {
-            config,
-            shutdown_handler,
-        }
+impl ScannerEngine {
+    pub fn new(concurrency: usize) -> Self {
+        Self { concurrency }
     }
 
-    pub async fn run(&self) -> Result<Vec<ScanResult>, ScanError> {
-        let resolver = TargetResolver::new(&self.config.targets, &self.config.exclude)?;
-        let targets = resolver.resolve(self.config.randomize);
+    pub async fn run(&self, target_input: &str, ports: Vec<u16>) -> Result<Vec<u16>, ScanError> {
+        let start_time = Instant::now();
 
-        if targets.is_empty() {
-            return Err(ScanError::TargetError(
-                crate::core::target::TargetError::ResolutionFailed("No valid targets".to_string())
-            ));
-        }
+        let generator = TargetGenerator::new(target_input)?;
+        let targets: Vec<_> = generator.into_iter().map(|ip| ip.to_string()).collect();
 
-        info!("Starting scan of {} targets", targets.len());
+        let mut open_ports = Vec::new();
+        let worker = Worker::new(1);
 
-        let ports = self.config.port_strategy.get_ports();
-        let total_scans = targets.len() * ports.len();
-        info!("Will perform {} port scans", total_scans);
-
-        let mut results = Vec::new();
-        let concurrency = self.config.concurrency;
-        let timeout_ms = self.config.timeout_ms;
-        let retries = self.config.retries;
-
-        let tasks: Vec<_> = targets
-            .iter()
-            .flat_map(|target| {
-                let ip_str = target.to_string();
-                ports.iter().map(move |&port| (ip_str.clone(), port))
-            })
-            .collect();
-
-        let mut stream = stream::iter(tasks)
-            .map(|(ip, port)| {
-                let shutdown = Arc::clone(&self.shutdown_handler);
-                async move {
-                    if shutdown.is_shutdown_requested() {
-                        return None;
+        for target in targets {
+            let results: Vec<ScanResult> = stream::iter(ports.clone())
+                .map(|port| {
+                    let target_clone = target.clone();
+                    let worker_clone = Worker::new(1);
+                    async move {
+                        match worker_clone.process_task(&target_clone, port).await {
+                            Ok(result) => Some(result),
+                            Err(_) => None,
+                        }
                     }
-                    scan_port_with_retry(ip, port, timeout_ms, retries).await
-                }
-            })
-            .buffer_unordered(concurrency);
+                })
+                .buffer_unordered(self.concurrency)
+                .filter_map(|x| async move { x })
+                .collect()
+                .await;
 
-        while let Some(result) = stream.next().await {
-            if let Some(scan_result) = result {
-                results.push(scan_result);
-            }
-            
-            if self.shutdown_handler.is_shutdown_requested() {
-                warn!("Scan interrupted by user");
-                break;
+            for res in results {
+                if res.is_open {
+                    open_ports.push(res.port);
+                }
             }
         }
 
-        results.sort_by(|a, b| {
-            a.ip.cmp(&b.ip).then_with(|| a.port.cmp(&b.port))
-        });
+        let duration = start_time.elapsed().as_secs_f64();
+        info!("Scan completed in {:.2} seconds.", duration);
 
-        info!("Scan completed. Found {} open ports", results.len());
-        Ok(results)
+        Ok(open_ports)
     }
 }

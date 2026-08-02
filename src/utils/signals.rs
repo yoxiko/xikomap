@@ -2,31 +2,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::info;
 
-pub struct ShutdownHandler {
-    pub shutdown_flag: Arc<AtomicBool>,
+pub struct ShutdownSignal {
+    flag: Arc<AtomicBool>,
 }
 
-impl ShutdownHandler {
+impl ShutdownSignal {
     pub fn new() -> Self {
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_clone = Arc::clone(&flag);
+        let flag_clone = flag.clone();
 
         ctrlc::set_handler(move || {
-            info!("Received SIGINT. Gracefully shutting down...");
+            info!("Received shutdown signal, terminating gracefully...");
             flag_clone.store(true, Ordering::SeqCst);
         })
         .expect("Error setting Ctrl-C handler");
 
-        Self { shutdown_flag: flag }
+        Self { flag }
     }
 
     pub fn is_shutdown_requested(&self) -> bool {
-        self.shutdown_flag.load(Ordering::SeqCst)
-    }
-}
-
-impl Default for ShutdownHandler {
-    fn default() -> Self {
-        Self::new()
+        self.flag.load(Ordering::SeqCst)
     }
 }

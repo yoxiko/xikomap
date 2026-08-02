@@ -4,4 +4,4 @@ pub mod types;
 
 pub use json::JsonReporter;
 pub use markdown::MarkdownReporter;
-pub use types::ScanReport;
+pub use types::{ScanMetadata, ScanReport};

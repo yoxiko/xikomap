@@ -1,5 +1,5 @@
 use crate::core::target::{TargetError, TargetGenerator};
-use crate::prober::tcp::{probe_tcp, ProbeError};
+use crate::prober::tcp::ProbeError;
 use crate::scanner::worker::{ScanResult, Worker};
 use futures::stream::{self, StreamExt};
 use std::time::Instant;
@@ -30,15 +30,14 @@ impl ScannerEngine {
         let targets: Vec<_> = generator.into_iter().map(|ip| ip.to_string()).collect();
 
         let mut open_ports = Vec::new();
-        let worker = Worker::new(1);
 
         for target in targets {
             let results: Vec<ScanResult> = stream::iter(ports.clone())
                 .map(|port| {
                     let target_clone = target.clone();
-                    let worker_clone = Worker::new(1);
                     async move {
-                        match worker_clone.process_task(&target_clone, port).await {
+                        let worker = Worker::new(1);
+                        match worker.process_task(&target_clone, port).await {
                             Ok(result) => Some(result),
                             Err(_) => None,
                         }
@@ -57,7 +56,7 @@ impl ScannerEngine {
         }
 
         let duration = start_time.elapsed().as_secs_f64();
-        info!("Scan completed in {:.2} seconds.", duration);
+        info!("TCP scan completed in {:.2} seconds.", duration);
 
         Ok(open_ports)
     }

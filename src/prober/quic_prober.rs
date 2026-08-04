@@ -4,6 +4,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig as RustlsClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::sync::Arc;
 use std::time::Duration;
+use quinn::{ClientConfig, Endpoint};
 
 #[derive(Debug)]
 struct SkipServerVerification;
@@ -59,20 +60,7 @@ pub struct QuicProbeResult {
     pub alpn: Option<String>,
 }
 
-pub async fn probe_quic(host: &str, port: u16) -> Option<QuicProbeResult> {
-    let mut crypto = RustlsClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
-
-    crypto.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec(), b"hq-interop".to_vec()];
-
-    let quic_config = QuicClientConfig::try_from(crypto).ok()?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic_config));
-
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().ok()?).ok()?;
-    endpoint.set_default_client_config(client_config);
-
+pub async fn probe_quic(host: &str, port: u16, endpoint: &Endpoint) -> Option<QuicProbeResult> {
     let addr = format!("{}:{}", host, port).parse().ok()?;
 
     let connect_future = endpoint.connect(addr, host);
@@ -86,7 +74,7 @@ pub async fn probe_quic(host: &str, port: u16) -> Option<QuicProbeResult> {
             let alpn = conn
                 .handshake_data()
                 .and_then(|hd| {
-                    hd.downcast::<quinn::crypto::rustls::HandshakeData>()
+                    hd.downcast::<quinn::crypto::rustls::QuicHandshakeData>()
                         .ok()
                 })
                 .and_then(|hd| {
@@ -104,4 +92,21 @@ pub async fn probe_quic(host: &str, port: u16) -> Option<QuicProbeResult> {
         }
         _ => None,
     }
+}
+
+pub fn create_quic_endpoint() -> Option<Endpoint> {
+    let mut crypto = RustlsClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_no_client_auth();
+
+    crypto.alpn_protocols = vec![b"h3".to_vec(), b"h3-29".to_vec(), b"hq-interop".to_vec()];
+
+    let quic_config = QuicClientConfig::try_from(crypto).ok()?;
+    let client_config = ClientConfig::new(Arc::new(quic_config));
+
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().ok()?).ok()?;
+    endpoint.set_default_client_config(client_config);
+
+    Some(endpoint)
 }

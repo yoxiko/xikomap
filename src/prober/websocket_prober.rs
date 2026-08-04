@@ -17,7 +17,7 @@ pub struct WebSocketProbeResult {
 }
 
 pub async fn probe_websocket(host: &str, port: u16) -> Option<WebSocketProbeResult> {
-    let scheme = if port == 443 || port == 8443 || port == 8443 {
+    let scheme = if port == 443 || port == 8443 {
         "wss"
     } else {
         "ws"
@@ -29,7 +29,7 @@ pub async fn probe_websocket(host: &str, port: u16) -> Option<WebSocketProbeResu
         let request = match Request::builder()
             .uri(&url)
             .header("User-Agent", "XikomapScanner/1.0")
-            .header("Origin", format!("http://{}", host))
+            .header("Origin", format!("{}://{}", scheme, host))
             .body(())
         {
             Ok(r) => r,

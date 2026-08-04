@@ -1,4 +1,5 @@
 use std::time::Duration;
+use reqwest::Client;
 
 pub struct GrpcProbeResult {
     pub status: String,
@@ -6,7 +7,7 @@ pub struct GrpcProbeResult {
     pub http_version: String,
 }
 
-pub async fn probe_grpc(host: &str, port: u16) -> Option<GrpcProbeResult> {
+pub async fn probe_grpc(host: &str, port: u16, client: &Client) -> Option<GrpcProbeResult> {
     let scheme = if port == 443 || port == 8443 {
         "https"
     } else {
@@ -17,13 +18,6 @@ pub async fn probe_grpc(host: &str, port: u16) -> Option<GrpcProbeResult> {
         "{}://{}:{}/grpc.health.v1.Health/Check",
         scheme, host, port
     );
-
-    let client = reqwest::Client::builder()
-        .http2_prior_knowledge()
-        .timeout(Duration::from_secs(4))
-        .danger_accept_invalid_certs(true)
-        .build()
-        .ok()?;
 
     let grpc_body: Vec<u8> = vec![0x00, 0x00, 0x00, 0x00, 0x00];
 

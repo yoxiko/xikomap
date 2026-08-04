@@ -31,10 +31,10 @@ if not exist "%INSTALL_DIR%\py_detectors" mkdir "%INSTALL_DIR%\py_detectors"
 
 echo Copying files...
 copy /Y "target\release\xikomap.exe" "%INSTALL_DIR%\" >nul
-xcopy /E /Y /I "py_detectors\*" "%INSTALL_DIR%\py_detectors\" >nul
+xcopy /E /Y /I "py_detectors\*" "%INSTALL_DIR%\py_detectors" >nul
 
 echo Updating user PATH...
-powershell -Command "$path = [Environment]::GetEnvironmentVariable('PATH', 'User'); if ($path -notlike '*%INSTALL_DIR%*') { [Environment]::SetEnvironmentVariable('PATH', $path + ';%INSTALL_DIR%', 'User') }"
+powershell -Command "$path = [Environment]::GetEnvironmentVariable('PATH', 'User'); if ($path -notlike '*%INSTALL_DIR%\*') { [Environment]::SetEnvironmentVariable('PATH', $path + ';%INSTALL_DIR%', 'User') }"
 
 echo Installation complete. Restart your terminal and run 'xikomap'.
 pause

@@ -1,27 +1,44 @@
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::tcp::{ipv4_checksum, MutableTcpPacket, TcpFlags, TcpPacket};
-use pnet::transport::{tcp_packet_iter, transport_channel, TransportChannelType, TransportProtocol};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tracing::{debug, info};
+#[cfg(target_os = "windows")]
+pub struct SynScanner;
 
+#[cfg(target_os = "windows")]
+impl SynScanner {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn run(&self, _target: &str, _ports: Vec<u16>) -> Result<Vec<u16>, String> {
+        Err("SYN scan is not supported on Windows (requires Npcap SDK). Falling back to connect scan.".to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 pub struct SynScanner {
     wait_secs: u64,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl Default for SynScanner {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 impl SynScanner {
     pub fn new() -> Self {
         Self { wait_secs: 4 }
     }
 
     pub async fn run(&self, target: &str, ports: Vec<u16>) -> Result<Vec<u16>, String> {
+        use pnet::packet::ip::IpNextHeaderProtocols;
+        use pnet::packet::tcp::{ipv4_checksum, MutableTcpPacket, TcpFlags, TcpPacket};
+        use pnet::packet::Packet;
+        use pnet::transport::{ipv4_packet_iter, transport_channel, TransportChannelType, TransportProtocol};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
         let start = Instant::now();
 
         let target_ip = resolve_target(target).await?;
@@ -34,7 +51,7 @@ impl SynScanner {
         )
         .map_err(|e| {
             format!(
-                "Raw socket unavailable (run as administrator / install Npcap): {}",
+                "Raw socket unavailable (run as root / administrator): {}",
                 e
             )
         })?;
@@ -45,31 +62,35 @@ impl SynScanner {
         let wait = self.wait_secs;
 
         let listener = std::thread::spawn(move || {
-            let mut iter = tcp_packet_iter(&mut rx);
+            let mut iter = ipv4_packet_iter(&mut rx);
             let deadline = Instant::now() + Duration::from_secs(wait);
             loop {
                 if Instant::now() >= deadline {
                     break;
                 }
-                match iter.next_with_timeout(Duration::from_millis(250)) {
-                    Ok(Some((tcp, addr))) => {
+                match iter.next() {
+                    Ok((ipv4, addr)) => {
                         if addr != IpAddr::V4(target_ip) {
                             continue;
                         }
-                        let flags = tcp.get_flags();
-                        if flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK != 0 {
-                            let sport = tcp.get_source();
-                            if listener_ports.contains(&sport) {
-                                let mut open = listener_open.lock().unwrap();
-                                if !open.contains(&sport) {
-                                    open.push(sport);
+                        if ipv4.get_next_level_protocol() != IpNextHeaderProtocols::Tcp {
+                            continue;
+                        }
+                        if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
+                            let flags = tcp.get_flags();
+                            if flags & TcpFlags::SYN != 0 && flags & TcpFlags::ACK != 0 {
+                                let sport = tcp.get_source();
+                                if listener_ports.contains(&sport) {
+                                    let mut open = listener_open.lock().unwrap();
+                                    if !open.contains(&sport) {
+                                        open.push(sport);
+                                    }
                                 }
                             }
                         }
                     }
-                    Ok(None) => {}
                     Err(e) => {
-                        debug!("Receiver error: {}", e);
+                        tracing::debug!("Receiver error: {}", e);
                         break;
                     }
                 }
@@ -97,7 +118,7 @@ impl SynScanner {
             }
             let packet = TcpPacket::new(&buf).unwrap();
             if let Err(e) = tx.send_to(&packet, IpAddr::V4(target_ip)) {
-                debug!("Send error on port {}: {}", port, e);
+                tracing::debug!("Send error on port {}: {}", port, e);
             }
             if i % 50 == 49 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -109,7 +130,7 @@ impl SynScanner {
         let mut result = open_ports.lock().unwrap().clone();
         result.sort_unstable();
 
-        info!(
+        tracing::info!(
             "TCP scan completed in {:.2} seconds.",
             start.elapsed().as_secs_f64()
         );
@@ -118,7 +139,9 @@ impl SynScanner {
     }
 }
 
-async fn resolve_target(target: &str) -> Result<Ipv4Addr, String> {
+#[cfg(not(target_os = "windows"))]
+async fn resolve_target(target: &str) -> Result<std::net::Ipv4Addr, String> {
+    use std::net::{IpAddr, Ipv4Addr};
     if let Ok(ip) = target.parse::<Ipv4Addr>() {
         return Ok(ip);
     }
@@ -133,7 +156,9 @@ async fn resolve_target(target: &str) -> Result<Ipv4Addr, String> {
     Err("No IPv4 address resolved for target".to_string())
 }
 
-fn local_source_ip(target: Ipv4Addr) -> Option<Ipv4Addr> {
+#[cfg(not(target_os = "windows"))]
+fn local_source_ip(target: std::net::Ipv4Addr) -> Option<std::net::Ipv4Addr> {
+    use std::net::{IpAddr, SocketAddr};
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket
         .connect(SocketAddr::new(IpAddr::V4(target), 1))

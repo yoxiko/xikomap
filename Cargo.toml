@@ -21,5 +21,6 @@ chrono = { version = "0.4", features = ["serde"] }
 ctrlc = "3.4"
 rand = "0.8"
 ipnetwork = "0.20"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
 pnet = "0.34"
-socket2 = "0.5"

@@ -74,12 +74,13 @@ pub async fn probe_quic(host: &str, port: u16, endpoint: &Endpoint) -> Option<Qu
             let alpn = conn
                 .handshake_data()
                 .and_then(|hd| {
-                    hd.downcast::<quinn::crypto::rustls::QuicHandshakeData>()
+                    hd.downcast::<quinn::crypto::rustls::HandshakeData>()
                         .ok()
                 })
                 .and_then(|hd| {
                     hd.protocol
-                        .map(|p| String::from_utf8_lossy(&p).into_owned())
+                        .as_ref()
+                        .map(|p| String::from_utf8_lossy(p).into_owned())
                 });
 
             let protocol = match &alpn {

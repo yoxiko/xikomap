@@ -10,6 +10,7 @@ use crate::prober::{grpc_prober, quic_prober, websocket_prober};
 use crate::scanner::ScannerEngine;
 use crate::utils::logger::init_logger;
 use std::env;
+use std::time::Duration;
 use tracing::info;
 
 #[tokio::main]
@@ -46,6 +47,15 @@ async fn main() {
 
     let engine = ScannerEngine::new(100);
 
+    let http_client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .timeout(Duration::from_secs(4))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("Failed to create HTTP client");
+
+    let quic_endpoint = quic_prober::create_quic_endpoint().expect("Failed to create QUIC endpoint");
+
     match engine.run(target, ports.clone()).await {
         Ok(open_ports) => {
             info!("TCP scan completed. Found {} open ports.", open_ports.len());
@@ -59,27 +69,27 @@ async fn main() {
                     port: *port,
                 });
                 graph.add_edge(target_node, port_node, GraphEdge::Hosts);
-                info!("  [+] Open TCP port: {}", port);
+                info!(" [+] Open TCP port: {}", port);
 
                 if [80, 443, 8080, 8443, 3000, 8000].contains(port) {
                     if let Some(ws) = websocket_prober::probe_websocket(target, *port).await {
-                        info!("      [+] WebSocket detected: {}://{}:{}{}", ws.scheme, target, port, ws.path);
+                        info!(" [+] WebSocket detected: {}://{}:{}{}", ws.scheme, target, port, ws.path);
                         let ws_node = graph.add_node(GraphNode::Service { port: *port, name: "websocket".to_string() });
                         graph.add_edge(port_node, ws_node, GraphEdge::Runs);
                     }
 
-                    if let Some(grpc) = grpc_prober::probe_grpc(target, *port).await {
-                        info!("      [+] gRPC detected: status={}", grpc.status);
+                    if let Some(grpc) = grpc_prober::probe_grpc(target, *port, &http_client).await {
+                        info!(" [+] gRPC detected: status={}", grpc.status);
                         let grpc_node = graph.add_node(GraphNode::Service { port: *port, name: "grpc".to_string() });
                         graph.add_edge(port_node, grpc_node, GraphEdge::Runs);
                     }
                 }
 
-                if let Some(quic) = quic_prober::probe_quic(target, *port).await {
-                    info!("      [+] QUIC/HTTP3 detected: {} (ALPN: {:?})", quic.protocol, quic.alpn);
-                    let quic_node = graph.add_node(GraphNode::Technology { 
-                        name: quic.protocol, 
-                        version: quic.alpn 
+                if let Some(quic) = quic_prober::probe_quic(target, *port, &quic_endpoint).await {
+                    info!(" [+] QUIC/HTTP3 detected: {} (ALPN: {:?})", quic.protocol, quic.alpn);
+                    let quic_node = graph.add_node(GraphNode::Technology {
+                        name: quic.protocol,
+                        version: quic.alpn
                     });
                     graph.add_edge(port_node, quic_node, GraphEdge::Uses);
                 }

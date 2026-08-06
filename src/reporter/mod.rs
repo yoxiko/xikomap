@@ -1,7 +1,3 @@
-pub mod json;
-pub mod markdown;
-pub mod types;
-
-pub use json::JsonReporter;
-pub use markdown::MarkdownReporter;
-pub use types::{ScanMetadata, ScanReport};
+pub mod graphml_reporter;
+pub mod json_reporter;
+pub mod pdf_reporter;

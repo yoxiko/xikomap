@@ -1,63 +1,59 @@
-use crate::core::target::{TargetError, TargetGenerator};
-use crate::prober::tcp::ProbeError;
-use crate::scanner::worker::{ScanResult, Worker};
-use futures::stream::{self, StreamExt};
-use std::time::Instant;
-use thiserror::Error;
-use tracing::info;
-
-#[derive(Error, Debug)]
-pub enum ScanError {
-    #[error("Target error: {0}")]
-    Target(#[from] TargetError),
-    #[error("Probe error: {0}")]
-    Probe(#[from] ProbeError),
-}
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 pub struct ScannerEngine {
     concurrency: usize,
+    timeout_ms: u64,
 }
 
 impl ScannerEngine {
     pub fn new(concurrency: usize) -> Self {
-        Self { concurrency }
+        ScannerEngine {
+            concurrency,
+            timeout_ms: 2000,
+        }
     }
 
-    pub async fn run(&self, target_input: &str, ports: Vec<u16>) -> Result<Vec<u16>, ScanError> {
-        let start_time = Instant::now();
+    pub async fn run(&self, target: &str, ports: Vec<u16>) -> Result<Vec<u16>, String> {
+        let addrs: Vec<SocketAddr> = format!("{}:0", target)
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?
+            .map(|mut a| {
+                a.set_port(0);
+                a
+            })
+            .collect();
 
-        let generator = TargetGenerator::new(target_input)?;
-        let targets: Vec<_> = generator.into_iter().map(|ip| ip.to_string()).collect();
+        if addrs.is_empty() {
+            return Err("Could not resolve target".to_string());
+        }
 
+        let ip = addrs[0].ip();
         let mut open_ports = Vec::new();
+        let mut tasks = Vec::new();
 
-        for target in targets {
-            let results: Vec<ScanResult> = stream::iter(ports.clone())
-                .map(|port| {
-                    let target_clone = target.clone();
-                    async move {
-                        let worker = Worker::new(1);
-                        match worker.process_task(&target_clone, port).await {
-                            Ok(result) => Some(result),
-                            Err(_) => None,
-                        }
+        for chunk in ports.chunks(self.concurrency) {
+            for &port in chunk {
+                let addr = SocketAddr::new(ip, port);
+                let t = self.timeout_ms;
+                tasks.push(tokio::spawn(async move {
+                    match timeout(Duration::from_millis(t), TcpStream::connect(addr)).await {
+                        Ok(Ok(_)) => Some(port),
+                        _ => None,
                     }
-                })
-                .buffer_unordered(self.concurrency)
-                .filter_map(|x| async move { x })
-                .collect()
-                .await;
+                }));
+            }
 
-            for res in results {
-                if res.is_open {
-                    open_ports.push(res.port);
+            for handle in tasks.drain(..) {
+                if let Ok(Some(port)) = handle.await {
+                    open_ports.push(port);
                 }
             }
         }
 
-        let duration = start_time.elapsed().as_secs_f64();
-        info!("TCP scan completed in {:.2} seconds.", duration);
-
+        open_ports.sort();
         Ok(open_ports)
     }
 }

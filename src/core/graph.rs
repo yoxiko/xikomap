@@ -1,73 +1,42 @@
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::Directed;
-use serde::Serialize;
-use std::collections::HashMap;
+use petgraph::graph::{DiGraph, NodeIndex};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraphNode {
     Domain(String),
-    IpAddress(String),
     Port { ip: String, port: u16 },
     Service { port: u16, name: String },
-    Technology { name: String, version: Option<String> },
+    Technology { name: String, version: String },
+    Subdomain(String),
+    Vulnerability { cve: String, severity: String },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GraphEdge {
-    ResolvesTo,
     Hosts,
     Runs,
     Uses,
-}
-
-#[derive(Serialize)]
-struct ExportNode {
-    id: usize,
-    label: String,
-    node_type: String,
-    data: GraphNode,
-}
-
-#[derive(Serialize)]
-struct ExportEdge {
-    source: usize,
-    target: usize,
-    relation: String,
-    data: GraphEdge,
-}
-
-#[derive(Serialize)]
-struct GraphExport {
-    nodes: Vec<ExportNode>,
-    edges: Vec<ExportEdge>,
+    Related,
+    Exposes,
 }
 
 pub struct ReconGraph {
-    graph: Graph<GraphNode, GraphEdge, Directed>,
-    node_map: HashMap<GraphNode, NodeIndex>,
+    pub graph: DiGraph<GraphNode, GraphEdge>,
 }
 
 impl ReconGraph {
     pub fn new() -> Self {
-        Self {
-            graph: Graph::new(),
-            node_map: HashMap::new(),
+        ReconGraph {
+            graph: DiGraph::new(),
         }
     }
 
     pub fn add_node(&mut self, node: GraphNode) -> NodeIndex {
-        if let Some(&idx) = self.node_map.get(&node) {
-            return idx;
-        }
-        let idx = self.graph.add_node(node.clone());
-        self.node_map.insert(node, idx);
-        idx
+        self.graph.add_node(node)
     }
 
     pub fn add_edge(&mut self, from: NodeIndex, to: NodeIndex, edge: GraphEdge) {
-        if !self.graph.contains_edge(from, to) {
-            self.graph.add_edge(from, to, edge);
-        }
+        self.graph.add_edge(from, to, edge);
     }
 
     pub fn node_count(&self) -> usize {
@@ -78,105 +47,96 @@ impl ReconGraph {
         self.graph.edge_count()
     }
 
+    pub fn nodes(&self) -> impl Iterator<Item = &GraphNode> {
+        self.graph.node_weights()
+    }
+
+    pub fn edges(&self) -> impl Iterator<Item = &GraphEdge> {
+        self.graph.edge_weights()
+    }
+
     pub fn export_to_json(&self) -> Result<String, serde_json::Error> {
-        let nodes: Vec<ExportNode> = self
+        let nodes: Vec<serde_json::Value> = self
             .graph
-            .node_indices()
-            .map(|idx| {
-                let node = &self.graph[idx];
-                let (label, node_type) = match node {
-                    GraphNode::Domain(d) => (d.clone(), "domain".to_string()),
-                    GraphNode::IpAddress(ip) => (ip.clone(), "ip".to_string()),
-                    GraphNode::Port { ip, port } => (format!("{}:{}", ip, port), "port".to_string()),
-                    GraphNode::Service { port, name } => (format!("{}:{}", name, port), "service".to_string()),
-                    GraphNode::Technology { name, version } => (
-                        match version {
-                            Some(v) => format!("{}/{}", name, v),
-                            None => name.clone(),
-                        },
-                        "technology".to_string(),
-                    ),
+            .node_weights()
+            .enumerate()
+            .map(|(i, node)| {
+                let node_type = match node {
+                    GraphNode::Domain(_) => "domain",
+                    GraphNode::Port { .. } => "port",
+                    GraphNode::Service { .. } => "service",
+                    GraphNode::Technology { .. } => "technology",
+                    GraphNode::Subdomain(_) => "subdomain",
+                    GraphNode::Vulnerability { .. } => "vulnerability",
                 };
-                ExportNode {
-                    id: idx.index(),
-                    label,
-                    node_type,
-                    data: node.clone(),
-                }
+                serde_json::json!({
+                    "id": i,
+                    "type": node_type,
+                    "data": node,
+                })
             })
             .collect();
 
-        let edges: Vec<ExportEdge> = self
+        let edges: Vec<serde_json::Value> = self
             .graph
             .edge_indices()
             .map(|idx| {
-                let (source, target) = self.graph.edge_endpoints(idx).unwrap();
-                let edge = &self.graph[idx];
-                let relation = match edge {
-                    GraphEdge::ResolvesTo => "resolves_to".to_string(),
-                    GraphEdge::Hosts => "hosts".to_string(),
-                    GraphEdge::Runs => "runs".to_string(),
-                    GraphEdge::Uses => "uses".to_string(),
-                };
-                ExportEdge {
-                    source: source.index(),
-                    target: target.index(),
-                    relation,
-                    data: edge.clone(),
-                }
+                let (from, to) = self.graph.edge_endpoints(idx).unwrap();
+                let edge = self.graph.edge_weight(idx).unwrap();
+                serde_json::json!({
+                    "from": from.index(),
+                    "to": to.index(),
+                    "type": edge,
+                })
             })
             .collect();
 
-        let export = GraphExport { nodes, edges };
-        serde_json::to_string_pretty(&export)
+        let output = serde_json::json!({
+            "nodes": nodes,
+            "edges": edges,
+        });
+
+        serde_json::to_string_pretty(&output)
     }
 
     pub fn export_to_graphml(&self) -> String {
-        let mut xml = String::new();
-        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         xml.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\">\n");
-        xml.push_str("  <key id=\"label\" for=\"node\" attr.name=\"label\" attr.type=\"string\"/>\n");
-        xml.push_str("  <key id=\"type\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n");
-        xml.push_str("  <key id=\"relation\" for=\"edge\" attr.name=\"relation\" attr.type=\"string\"/>\n");
+        xml.push_str("  <key id=\"d0\" for=\"node\" attr.name=\"type\" attr.type=\"string\"/>\n");
+        xml.push_str("  <key id=\"d1\" for=\"edge\" attr.name=\"type\" attr.type=\"string\"/>\n");
         xml.push_str("  <graph id=\"G\" edgedefault=\"directed\">\n");
 
-        for idx in self.graph.node_indices() {
-            let node = &self.graph[idx];
-            let (label, ntype) = match node {
-                GraphNode::Domain(d) => (escape_xml(d), "domain"),
-                GraphNode::IpAddress(ip) => (escape_xml(ip), "ip"),
-                GraphNode::Port { ip, port } => (escape_xml(&format!("{}:{}", ip, port)), "port"),
-                GraphNode::Service { port, name } => (escape_xml(&format!("{}:{}", name, port)), "service"),
-                GraphNode::Technology { name, version } => (
-                    match version {
-                        Some(v) => escape_xml(&format!("{}/{}", name, v)),
-                        None => escape_xml(name),
-                    },
-                    "technology",
-                ),
+        for (i, node) in self.graph.node_weights().enumerate() {
+            let node_type = match node {
+                GraphNode::Domain(_) => "domain",
+                GraphNode::Port { .. } => "port",
+                GraphNode::Service { .. } => "service",
+                GraphNode::Technology { .. } => "technology",
+                GraphNode::Subdomain(_) => "subdomain",
+                GraphNode::Vulnerability { .. } => "vulnerability",
             };
             xml.push_str(&format!(
-                "    <node id=\"n{}\">\n      <data key=\"label\">{}</data>\n      <data key=\"type\">{}</data>\n    </node>\n",
-                idx.index(),
-                label,
-                ntype
+                "    <node id=\"n{}\"><data key=\"d0\">{}</data></node>\n",
+                i, node_type
             ));
         }
 
-        for idx in self.graph.edge_indices() {
-            let (source, target) = self.graph.edge_endpoints(idx).unwrap();
-            let edge = &self.graph[idx];
-            let relation = match edge {
-                GraphEdge::ResolvesTo => "resolves_to",
+        for (i, idx) in self.graph.edge_indices().enumerate() {
+            let (from, to) = self.graph.edge_endpoints(idx).unwrap();
+            let edge = self.graph.edge_weight(idx).unwrap();
+            let edge_type = match edge {
                 GraphEdge::Hosts => "hosts",
                 GraphEdge::Runs => "runs",
                 GraphEdge::Uses => "uses",
+                GraphEdge::Related => "related",
+                GraphEdge::Exposes => "exposes",
             };
             xml.push_str(&format!(
-                "    <edge source=\"n{}\" target=\"n{}\">\n      <data key=\"relation\">{}</data>\n    </edge>\n",
-                source.index(),
-                target.index(),
-                relation
+                "    <edge id=\"e{}\" source=\"n{}\" target=\"n{}\"><data key=\"d1\">{}</data></edge>\n",
+                i,
+                from.index(),
+                to.index(),
+                edge_type
             ));
         }
 
@@ -184,12 +144,4 @@ impl ReconGraph {
         xml.push_str("</graphml>\n");
         xml
     }
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

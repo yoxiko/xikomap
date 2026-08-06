@@ -1,4 +1,5 @@
 use quinn::Endpoint;
+use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, UdpSocket};
 
@@ -10,15 +11,13 @@ pub struct QuicInfo {
 
 pub fn create_quic_endpoint() -> Option<Endpoint> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    match Endpoint::new(
+    Endpoint::new(
         quinn::EndpointConfig::default(),
         None,
         socket,
         quinn::default_runtime()?,
-    ) {
-        Ok((endpoint, _)) => Some(endpoint),
-        Err(_) => None,
-    }
+    )
+    .ok()
 }
 
 pub async fn probe_quic(host: &str, port: u16, endpoint: &Endpoint) -> Option<QuicInfo> {
@@ -42,7 +41,6 @@ pub async fn probe_quic(host: &str, port: u16, endpoint: &Endpoint) -> Option<Qu
 
     let alpn = connection
         .handshake_data()
-        .ok()
         .and_then(|data| {
             data.downcast::<quinn::crypto::rustls::HandshakeData>()
                 .ok()
@@ -66,8 +64,8 @@ struct SkipServerVerification;
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
         _: &rustls::pki_types::ServerName<'_>,
         _: &[u8],
         _: rustls::pki_types::UnixTime,
@@ -78,8 +76,8 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_tls12_signature(
         &self,
         _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::crypto::CryptoProvider,
+        _: &CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
@@ -87,8 +85,8 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_tls13_signature(
         &self,
         _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::crypto::CryptoProvider,
+        _: &CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }

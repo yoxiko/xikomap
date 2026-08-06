@@ -52,7 +52,7 @@ impl GeoIPInfo {
 
         if let Ok(asn) = reader.lookup::<geoip2::Asn>(ip_addr) {
             info.asn = asn.autonomous_system_number;
-            info.asn_org = asn.autonomous_system_organization;
+            info.asn_org = asn.autonomous_system_organization.map(|s| s.to_string());
         }
 
         Ok(info)

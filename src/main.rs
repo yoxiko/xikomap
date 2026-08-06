@@ -1,84 +1,117 @@
-use clap::Parser;
-use colored::Colorize;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
+pub mod core;
+pub mod prober;
+pub mod reporter;
+pub mod scanner;
+pub mod python_bridge;
+pub mod utils;
 
 use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
-use crate::prober::{
-    dns_enumerator::DnsEnumerator, geoip::GeoIPInfo, grpc_prober, http2_fingerprint::HTTP2Fingerprint,
-    quic_prober, tls_fingerprint::TLSFingerprint, websocket_prober,
-};
-use crate::python_bridge::detector::PythonDetectorBridge;
-use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
+use crate::prober::{grpc_prober, quic_prober, websocket_prober};
 use crate::scanner::{ScannerEngine, SynScanner};
-use crate::utils::{cli::Cli, logger::init_logger, logo::print_logo};
-
-mod core;
-mod prober;
-mod python_bridge;
-mod reporter;
-mod scanner;
-mod utils;
+use crate::utils::logger::init_logger;
+use std::env;
+use std::time::Duration;
+use tracing::{debug, info};
 
 #[tokio::main]
 async fn main() {
-    print_logo();
     init_logger();
 
-    let cli = Cli::parse();
+    let args: Vec<String> = env::args().collect();
 
-    let target = cli.target.clone();
-    let ports: Vec<u16> = if cli.all {
-        (1..=65535).collect()
-    } else if cli.ports.is_empty() {
-        vec![22, 80, 443, 8080, 8443, 3000, 8000, 8888]
-    } else {
-        cli.ports.clone()
-    };
+    if args.len() < 2 {
+        println!("Usage: xikomap <target> [ports] [flags]");
+        println!("Example: xikomap scanme.nmap.org 22,80,443,8080 -sS -v -x");
+        println!();
+        println!("Scan types:");
+        println!("  -sS      SYN stealth scan (requires admin / Npcap)");
+        println!("  -sT      Connect scan (default)");
+        println!();
+        println!("Flags:");
+        println!("  -x       Save graph to JSON / GraphML");
+        println!("  -v       Verbose output");
+        println!("  -all     Scan all 65535 ports and probe every technology");
+        return;
+    }
 
-    if cli.all {
+    let mut target = String::new();
+    let mut ports: Vec<u16> = Vec::new();
+    let mut export_json = false;
+    let mut verbose = false;
+    let mut scan_all = false;
+    let mut syn_scan = false;
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "-x" => export_json = true,
+            "-v" => verbose = true,
+            "-all" => scan_all = true,
+            "-sS" => syn_scan = true,
+            "-sT" => syn_scan = false,
+            a if !a.starts_with('-') => {
+                if target.is_empty() {
+                    target = a.to_string();
+                } else if ports.is_empty() {
+                    ports = a
+                        .split(',')
+                        .filter_map(|p| p.trim().parse().ok())
+                        .collect();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if target.is_empty() {
+        println!("Error: no target specified");
+        return;
+    }
+
+    if scan_all {
+        ports = (1..=65535).collect();
         info!("Full scan mode enabled: scanning all 65535 ports");
+    } else if ports.is_empty() {
+        ports = vec![22, 80, 443, 8080, 8443, 3000, 8000, 8888];
+        info!("No ports specified. Using default common ports: {:?}", ports);
     } else {
         info!("Target ports: {:?}", ports);
     }
 
     info!("Starting advanced scan for target: {}", target);
-    info!(
-        "Scan type: {}",
-        if cli.stealth { "SYN (stealth)" } else { "Connect" }
-    );
 
-    let open_ports = if cli.stealth {
+    if syn_scan {
+        info!("Scan type: SYN (stealth)");
+    } else {
+        info!("Scan type: Connect");
+    }
+
+    let open_ports = if syn_scan {
         match SynScanner::new().run(&target, ports.clone()).await {
             Ok(p) => p,
             Err(e) => {
-                warn!("SYN scan unavailable: {}. Falling back to connect scan.", e);
-                let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
+                tracing::warn!("SYN scan unavailable: {}. Falling back to connect scan.", e);
+                let engine = ScannerEngine::new(if scan_all { 1000 } else { 100 });
                 match engine.run(&target, ports.clone()).await {
                     Ok(p) => p,
                     Err(e) => {
-                        error!("Scan failed: {}", e);
+                        tracing::error!("Scan failed: {}", e);
                         return;
                     }
                 }
             }
         }
     } else {
-        let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
+        let engine = ScannerEngine::new(if scan_all { 1000 } else { 100 });
         match engine.run(&target, ports.clone()).await {
             Ok(p) => p,
             Err(e) => {
-                error!("Scan failed: {}", e);
+                tracing::error!("Scan failed: {}", e);
                 return;
             }
         }
     };
 
-    info!(
-        "{} {}",
-        "[+]".green().bold(),
-        format!("TCP scan completed. Found {} open ports.", open_ports.len())
-    );
+    info!("TCP scan completed. Found {} open ports.", open_ports.len());
 
     let mut graph = ReconGraph::new();
     let target_node = graph.add_node(GraphNode::Domain(target.clone()));
@@ -92,10 +125,8 @@ async fn main() {
 
     let quic_endpoint = quic_prober::create_quic_endpoint();
     if quic_endpoint.is_none() {
-        warn!("QUIC endpoint unavailable, QUIC probing disabled");
+        tracing::warn!("QUIC endpoint unavailable, QUIC probing disabled");
     }
-
-    let py_bridge = PythonDetectorBridge::new().ok();
 
     for port in &open_ports {
         let port_node = graph.add_node(GraphNode::Port {
@@ -104,53 +135,47 @@ async fn main() {
         });
         graph.add_edge(target_node, port_node, GraphEdge::Hosts);
 
-        if cli.verbose {
-            debug!("{} Open TCP port: {}", "[+]".green().bold(), port);
+        if verbose {
+            debug!(" [+] Open TCP port: {}", port);
         } else {
-            info!("{} Open TCP port: {}", "[+]".green().bold(), port);
+            info!(" [+] Open TCP port: {}", port);
         }
 
-        if cli.all || [80, 443, 8443].contains(port) {
-            if let Some(ep) = &quic_endpoint {
-                if let Some(quic) = quic_prober::probe_quic(&target, *port, ep).await {
-                    info!(
-                        "{} QUIC/HTTP3 detected: {} (ALPN: {:?})",
-                        "[+]".green().bold(),
-                        quic.protocol,
-                        quic.alpn
-                    );
-                    let quic_node = graph.add_node(GraphNode::Technology {
-                        name: quic.protocol,
-                        version: quic.alpn.join(","),
-                    });
-                    graph.add_edge(port_node, quic_node, GraphEdge::Uses);
+        if scan_all || [80, 443, 8080, 8443, 3000, 8000, 9090, 50051, 10000].contains(port) {
+            if let Some(ws) = websocket_prober::probe_websocket(&target, *port).await {
+                info!(" [+] WebSocket detected: {}://{}:{}{}", ws.scheme, target, port, ws.path);
+                let ws_node = graph.add_node(GraphNode::Service {
+                    port: *port,
+                    name: "websocket".to_string(),
+                });
+                graph.add_edge(port_node, ws_node, GraphEdge::Runs);
+
+                if verbose {
+                    if let Some(server) = &ws.server_header {
+                        debug!("     Server header: {}", server);
+                    }
                 }
             }
-        }
 
             if let Some(grpc) = grpc_prober::probe_grpc(&target, *port, &http_client).await {
-                info!(
-                    "{} gRPC detected: status={}",
-                    "[+]".green().bold(),
-                    grpc.status
-                );
+                info!(" [+] gRPC detected: status={}", grpc.status);
                 let grpc_node = graph.add_node(GraphNode::Service {
                     port: *port,
                     name: "grpc".to_string(),
                 });
                 graph.add_edge(port_node, grpc_node, GraphEdge::Runs);
+
+                if verbose {
+                    debug!("     HTTP version: {}", grpc.http_version);
+                    debug!("     Content-Type: {}", grpc.content_type);
+                }
             }
         }
 
-        if cli.all || [80, 443, 8443].contains(port) {
+        if scan_all || [80, 443, 8443].contains(port) {
             if let Some(ep) = &quic_endpoint {
                 if let Some(quic) = quic_prober::probe_quic(&target, *port, ep).await {
-                    info!(
-                        "{} QUIC/HTTP3 detected: {} (ALPN: {:?})",
-                        "[+]".green().bold(),
-                        quic.protocol,
-                        quic.alpn
-                    );
+                    info!(" [+] QUIC/HTTP3 detected: {} (ALPN: {:?})", quic.protocol, quic.alpn);
                     let quic_node = graph.add_node(GraphNode::Technology {
                         name: quic.protocol,
                         version: quic.alpn,
@@ -159,128 +184,25 @@ async fn main() {
                 }
             }
         }
-
-        if [443, 8443].contains(port) {
-            match TLSFingerprint::analyze(&target, *port) {
-                Ok(fp) => {
-                    if let Some(ja3) = &fp.ja3 {
-                        info!("{} TLS JA3: {}", "[+]".green().bold(), ja3);
-                        let tls_node = graph.add_node(GraphNode::Technology {
-                            name: "TLS".to_string(),
-                            version: ja3.clone(),
-                        });
-                        graph.add_edge(port_node, tls_node, GraphEdge::Uses);
-                    }
-                }
-                Err(e) => debug!("TLS fingerprint failed: {}", e),
-            }
-        }
-
-        if [80, 443, 8080, 8443].contains(port) {
-            match HTTP2Fingerprint::analyze(&target, *port).await {
-                Ok(fp) => {
-                    if !fp.alpn.is_empty() {
-                        info!(
-                            "{} HTTP/2 ALPN: {:?}",
-                            "[+]".green().bold(),
-                            fp.alpn
-                        );
-                    }
-                }
-                Err(e) => debug!("HTTP/2 fingerprint failed: {}", e),
-            }
-        }
-
-        if let Some(bridge) = &py_bridge {
-            if [80, 443, 8080, 8443].contains(port) {
-                if let Ok(results) = bridge.run_fingerprinting(&target, *port) {
-                    if !results.detected.is_empty() {
-                        info!(
-                            "{} Fingerprinting: {:?}",
-                            "[+]".green().bold(),
-                            results.detected
-                        );
-                        for tech in &results.detected {
-                            let tech_node = graph.add_node(GraphNode::Technology {
-                                name: tech.clone(),
-                                version: results
-                                    .versions
-                                    .get(tech)
-                                    .cloned()
-                                    .unwrap_or_else(|| "unknown".to_string()),
-                            });
-                            graph.add_edge(port_node, tech_node, GraphEdge::Uses);
-                        }
-                    }
-                }
-
-                if let Ok(api) = bridge.run_api_discovery(&target, *port) {
-                    if api.openapi.is_some() || api.graphql.is_some() {
-                        info!("{} API endpoints discovered", "[+]".green().bold());
-                    }
-                }
-
-                if let Ok(cloud) = bridge.run_cloud_detection(&target) {
-                    if !cloud.services.is_empty() {
-                        info!(
-                            "{} Cloud services: {:?}",
-                            "[+]".green().bold(),
-                            cloud.services
-                        );
-                    }
-                }
-            }
-
-            if [1883, 5683, 8080, 8883, 5684, 5685].contains(port) {
-                if let Ok(iot) = bridge.run_iot_detection(&target, &open_ports) {
-                    if !iot.iot_devices.is_empty() {
-                        info!(
-                            "{} IoT devices: {:?}",
-                            "[+]".green().bold(),
-                            iot.iot_devices
-                        );
-                    }
-                }
-            }
-        }
     }
 
-    if let Ok(dns_enum) = DnsEnumerator::new() {
-        let subdomains = dns_enum.enumerate_subdomains(&target).await;
-        if !subdomains.is_empty() {
-            info!(
-                "{} Found {} subdomains",
-                "[+]".green().bold(),
-                subdomains.len()
-            );
-            for subdomain in subdomains.iter().take(10) {
-                let subdomain_node = graph.add_node(GraphNode::Domain(subdomain.clone()));
-                graph.add_edge(target_node, subdomain_node, GraphEdge::Related);
-            }
-        }
-    }
-
-    let safe_target_name = target.replace(['.', ':', '/'], "_");
-
-    if cli.export_json {
+    if export_json {
+        let safe_target_name = target.replace(['.', ':', '/'], "_");
         let json_output = format!("{}_graph.json", safe_target_name);
-        match json_reporter::export(&graph, &json_output) {
-            Ok(_) => info!("JSON saved to: {}", json_output),
-            Err(e) => error!("Failed to write JSON: {}", e),
+        if let Ok(json_data) = graph.export_to_json() {
+            if let Err(e) = std::fs::write(&json_output, json_data) {
+                tracing::error!("Failed to write graph JSON: {}", e);
+            } else {
+                info!("Graph saved to: {}", json_output);
+            }
         }
 
         let graphml_output = format!("{}_graph.graphml", safe_target_name);
-        match graphml_reporter::export(&graph, &graphml_output) {
-            Ok(_) => info!("GraphML saved to: {}", graphml_output),
-            Err(e) => error!("Failed to write GraphML: {}", e),
-        }
-    }
-
-    if cli.export_pdf {
-        let pdf_output = format!("{}_report.pdf", safe_target_name);
-        match pdf_reporter::PdfReporter::generate(&graph, &target, &pdf_output) {
-            Ok(_) => info!("PDF report saved to: {}", pdf_output),
-            Err(e) => error!("Failed to generate PDF: {}", e),
+        let graphml_data = graph.export_to_graphml();
+        if let Err(e) = std::fs::write(&graphml_output, graphml_data) {
+            tracing::error!("Failed to write GraphML: {}", e);
+        } else {
+            info!("GraphML saved to: {}", graphml_output);
         }
     }
 

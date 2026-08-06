@@ -1,5 +1,4 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -69,77 +68,91 @@ impl PythonDetectorBridge {
         Python::with_gil(|py| -> PyResult<()> {
             let sys = py.import_bound("sys")?;
             let path = sys.getattr("path")?;
-            path.call_method1(
-                "insert",
-                (0i32, std::env::current_dir()?.join("py_detectors")),
-            )?;
+            let detectors_path = std::env::current_dir()
+                .unwrap()
+                .join("py_detectors")
+                .to_str()
+                .unwrap()
+                .to_string();
+            path.call_method1("insert", (0i32, detectors_path))?;
             Ok(())
         })?;
         Ok(PythonDetectorBridge)
     }
 
-    pub fn run_fingerprinting(&self, target: &str, port: u16) -> Result<FingerprintingResults, PyErr> {
-        Python::with_gil(|py| {
-            let module = py.import_bound("fingerprinting_detector")?;
-            let detector_cls = module.getattr("FingerprintingDetector")?;
-            let detector = detector_cls.call0()?;
+    fn call_python_detector(
+        py: Python<'_>,
+        module_name: &str,
+        class_name: &str,
+        args: impl IntoPy<Py<pyo3::types::PyTuple>>,
+    ) -> PyResult<String> {
+        let module = py.import_bound(module_name)?;
+        let detector_cls = module.getattr(class_name)?;
+        let detector = detector_cls.call0()?;
+        let result = detector.call_method1("detect", args)?;
+        let json_mod = py.import_bound("json")?;
+        let json_str = json_mod.call_method1("dumps", (&result,))?;
+        json_str.extract()
+    }
 
+    pub fn run_fingerprinting(
+        &self,
+        target: &str,
+        port: u16,
+    ) -> Result<FingerprintingResults, PyErr> {
+        Python::with_gil(|py| {
             let scheme = if port == 80 || port == 8080 || port == 3000 {
                 "http"
             } else {
                 "https"
             };
             let url = format!("{}://{}:{}", scheme, target, port);
-
-            let result = detector.call_method1("detect", (url,))?;
-            let result_dict: &PyDict = result.downcast()?;
-
-            let json_str = py.import_bound("json")?.call_method1("dumps", (result_dict,))?;
-            let json_str: String = json_str.extract()?;
-
+            let json_str = Self::call_python_detector(
+                py,
+                "fingerprinting_detector",
+                "FingerprintingDetector",
+                (url,),
+            )?;
             let parsed: FingerprintingResults =
                 serde_json::from_str(&json_str).unwrap_or_default();
             Ok(parsed)
         })
     }
 
-    pub fn run_api_discovery(&self, target: &str, port: u16) -> Result<APIDiscoveryResults, PyErr> {
+    pub fn run_api_discovery(
+        &self,
+        target: &str,
+        port: u16,
+    ) -> Result<APIDiscoveryResults, PyErr> {
         Python::with_gil(|py| {
-            let module = py.import_bound("api_discovery")?;
-            let discovery_cls = module.getattr("APIDiscovery")?;
-            let discovery = discovery_cls.call0()?;
-
             let scheme = if port == 80 || port == 8080 || port == 3000 {
                 "http"
             } else {
                 "https"
             };
             let url = format!("{}://{}:{}", scheme, target, port);
-
-            let result = discovery.call_method1("discover", (url,))?;
-            let result_dict: &PyDict = result.downcast()?;
-
-            let json_str = py.import_bound("json")?.call_method1("dumps", (result_dict,))?;
-            let json_str: String = json_str.extract()?;
-
-            let parsed: APIDiscoveryResults = serde_json::from_str(&json_str).unwrap_or_default();
+            let json_str = Self::call_python_detector(
+                py,
+                "api_discovery",
+                "APIDiscovery",
+                (url,),
+            )?;
+            let parsed: APIDiscoveryResults =
+                serde_json::from_str(&json_str).unwrap_or_default();
             Ok(parsed)
         })
     }
 
     pub fn run_cloud_detection(&self, target: &str) -> Result<CloudDetectionResults, PyErr> {
         Python::with_gil(|py| {
-            let module = py.import_bound("cloud_detector")?;
-            let detector_cls = module.getattr("CloudDetector")?;
-            let detector = detector_cls.call0()?;
-
-            let result = detector.call_method1("detect", (target,))?;
-            let result_dict: &PyDict = result.downcast()?;
-
-            let json_str = py.import_bound("json")?.call_method1("dumps", (result_dict,))?;
-            let json_str: String = json_str.extract()?;
-
-            let parsed: CloudDetectionResults = serde_json::from_str(&json_str).unwrap_or_default();
+            let json_str = Self::call_python_detector(
+                py,
+                "cloud_detector",
+                "CloudDetector",
+                (target,),
+            )?;
+            let parsed: CloudDetectionResults =
+                serde_json::from_str(&json_str).unwrap_or_default();
             Ok(parsed)
         })
     }
@@ -150,18 +163,15 @@ impl PythonDetectorBridge {
         ports: &[u16],
     ) -> Result<IoTDetectionResults, PyErr> {
         Python::with_gil(|py| {
-            let module = py.import_bound("iot_detector")?;
-            let detector_cls = module.getattr("IoTDetector")?;
-            let detector = detector_cls.call0()?;
-
             let ports_vec: Vec<u16> = ports.to_vec();
-            let result = detector.call_method1("detect", (target, ports_vec))?;
-            let result_dict: &PyDict = result.downcast()?;
-
-            let json_str = py.import_bound("json")?.call_method1("dumps", (result_dict,))?;
-            let json_str: String = json_str.extract()?;
-
-            let parsed: IoTDetectionResults = serde_json::from_str(&json_str).unwrap_or_default();
+            let json_str = Self::call_python_detector(
+                py,
+                "iot_detector",
+                "IoTDetector",
+                (target, ports_vec),
+            )?;
+            let parsed: IoTDetectionResults =
+                serde_json::from_str(&json_str).unwrap_or_default();
             Ok(parsed)
         })
     }

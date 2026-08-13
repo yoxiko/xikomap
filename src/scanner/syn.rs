@@ -1,6 +1,15 @@
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::time::timeout;
+
+#[cfg(not(target_os = "windows"))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_os = "windows"))]
+use std::sync::Arc;
+#[cfg(not(target_os = "windows"))]
+use std::time::Instant;
+#[cfg(not(target_os = "windows"))]
+use tokio::time::sleep;
+#[cfg(not(target_os = "windows"))]
 use tracing::{debug, warn};
 
 #[cfg(not(target_os = "windows"))]
@@ -30,17 +39,19 @@ impl SynScanner {
         &self,
         target: IpAddr,
         ports: &[u16],
-        source_port: u16,
     ) -> Result<Vec<u16>, ScannerError> {
         #[cfg(target_os = "windows")]
         {
+            let _ = target;
+            let _ = ports;
             return Err(ScannerError::UnsupportedPlatform(
-                "SYN scan не поддерживается на Windows. Используйте connect-скан.".into(),
+                "SYN scan is not supported on Windows. Use connect scan.".into(),
             ));
         }
 
         #[cfg(not(target_os = "windows"))]
         {
+            let source_port = rand::random::<u16>() | 1024;
             self.run_raw_sockets(target, ports, source_port).await
         }
     }
@@ -53,10 +64,8 @@ impl SynScanner {
         source_port: u16,
     ) -> Result<Vec<u16>, ScannerError> {
         use std::collections::HashSet;
-        use std::sync::{Arc, Mutex};
-        use tokio::time::sleep;
+        use std::sync::Mutex;
 
-        // 1. Находим интерфейс
         let interface = datalink::interfaces()
             .into_iter()
             .find(|iface| {
@@ -84,26 +93,35 @@ impl SynScanner {
         let open_ports_clone = Arc::clone(&open_ports);
         let target_for_listener = target;
         let expected_source_port = source_port;
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let stop_signal_clone = Arc::clone(&stop_signal);
 
         let listener = tokio::task::spawn_blocking(move || {
             use pnet::transport::tcp_packet_iter;
 
             let mut iter = tcp_packet_iter(&mut rx);
-            let start = std::time::Instant::now();
 
-            while start.elapsed() < Duration::from_secs(5) {
+            loop {
+                if stop_signal_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 match iter.next() {
                     Ok((packet, addr)) => {
                         if addr.ip() == target_for_listener
                             && packet.get_source() == expected_source_port
-                            && (packet.get_flags() & TcpFlags::SYN != 0)
-                            && (packet.get_flags() & TcpFlags::ACK != 0)
                         {
+                            let flags = packet.get_flags();
                             let port = packet.get_destination();
-                            if let Ok(mut ports) = open_ports_clone.lock() {
-                                ports.insert(port);
+
+                            if (flags & TcpFlags::SYN != 0) && (flags & TcpFlags::ACK != 0) {
+                                if let Ok(mut ports) = open_ports_clone.lock() {
+                                    ports.insert(port);
+                                }
+                                debug!("SYN-ACK from port {}", port);
+                            } else if flags & TcpFlags::RST != 0 {
+                                debug!("RST from port {} (closed)", port);
                             }
-                            debug!("SYN-ACK from port {}", port);
                         }
                     }
                     Err(e) => {
@@ -120,6 +138,7 @@ impl SynScanner {
             Duration::from_micros(100)
         };
 
+        let start_time = Instant::now();
         for &port in ports {
             let mut buffer = [0u8; 20];
             let mut tcp_packet = MutableTcpPacket::new(&mut buffer)
@@ -144,10 +163,14 @@ impl SynScanner {
             sleep(interval).await;
         }
 
-        match timeout(self.timeout + Duration::from_secs(2), listener).await {
-            Ok(_) => {}
-            Err(_) => debug!("Listener timeout"),
+        let elapsed = start_time.elapsed();
+        if elapsed < self.timeout {
+            sleep(self.timeout - elapsed).await;
         }
+
+        stop_signal.store(true, Ordering::Relaxed);
+
+        let _ = tokio::time::timeout(Duration::from_millis(100), listener).await;
 
         let mut result: Vec<u16> = open_ports.lock().unwrap().iter().copied().collect();
         result.sort_unstable();
@@ -157,14 +180,14 @@ impl SynScanner {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScannerError {
-    #[error("SYN-скан не поддерживается на этой платформе: {0}")]
+    #[error("SYN scan is not supported on this platform: {0}")]
     UnsupportedPlatform(String),
-    #[error("Не найден подходящий сетевой интерфейс")]
+    #[error("No suitable network interface found")]
     NoInterface,
-    #[error("Нет IPv4 адреса для source")]
+    #[error("No IPv4 address available for source")]
     NoSourceIp,
-    #[error("Ошибка создания канала: {0}")]
+    #[error("Failed to create channel: {0}")]
     ChannelCreation(String),
-    #[error("Не удалось создать пакет")]
+    #[error("Failed to create packet")]
     PacketCreation,
 }

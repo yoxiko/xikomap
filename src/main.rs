@@ -1,21 +1,22 @@
 use colored::Colorize;
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
+use crate::detectors::{ApiDiscovery, CloudDetector, FingerprintingDetector, IoTDetector};
 use crate::prober::{
-    dns_enumerator::DnsEnumerator, grpc_prober, http2_fingerprint::HTTP2Fingerprint,
-    quic_prober, tls_fingerprint::TLSFingerprint, websocket_prober,
+    dns_enumerator::DnsEnumerator, grpc_prober, http2_fingerprint::HTTP2Fingerprint, quic_prober,
+    tls_fingerprint::TLSFingerprint, websocket_prober,
 };
-use crate::python_bridge::detector::PythonDetectorBridge;
 use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
 use crate::scanner::{ScannerEngine, SynScanner};
 use crate::utils::{cli::Cli, logger::init_logger, logo::print_logo};
 use clap::Parser;
 
 mod core;
+mod detectors;
 mod prober;
-mod python_bridge;
 mod reporter;
 mod scanner;
 mod utils;
@@ -48,18 +49,35 @@ async fn main() {
         if cli.stealth { "SYN (stealth)" } else { "Connect" }
     );
 
+    let target_ip = match format!("{}:0", target).to_socket_addrs() {
+        Ok(mut addrs) => addrs.next().map(|a| a.ip()),
+        Err(_) => None,
+    };
+
     let open_ports = if cli.stealth {
-        match SynScanner::new().run(&target, ports.clone()).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("SYN scan unavailable: {}. Falling back to connect scan.", e);
-                let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
-                match engine.run(&target, ports.clone()).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("Scan failed: {}", e);
-                        return;
+        if let Some(ip) = target_ip {
+            match SynScanner::new(2000, 1000).run(ip, &ports).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("SYN scan unavailable: {}. Falling back to connect scan.", e);
+                    let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
+                    match engine.run(&target, ports.clone()).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("Scan failed: {}", e);
+                            return;
+                        }
                     }
+                }
+            }
+        } else {
+            warn!("Could not resolve target to IP for SYN scan. Falling back to connect scan.");
+            let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
+            match engine.run(&target, ports.clone()).await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Scan failed: {}", e);
+                    return;
                 }
             }
         }
@@ -83,19 +101,27 @@ async fn main() {
     let mut graph = ReconGraph::new();
     let target_node = graph.add_node(GraphNode::Domain(target.clone()));
 
-    let http_client = reqwest::Client::builder()
+    let http_client = match reqwest::Client::builder()
         .http2_prior_knowledge()
         .timeout(Duration::from_secs(4))
         .danger_accept_invalid_certs(true)
         .build()
-        .expect("Failed to create HTTP client");
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to create HTTP client: {}", e);
+            return;
+        }
+    };
 
     let quic_endpoint = quic_prober::create_quic_endpoint();
     if quic_endpoint.is_none() {
         warn!("QUIC endpoint unavailable, QUIC probing disabled");
     }
 
-    let py_bridge = PythonDetectorBridge::new().ok();
+    let fp_detector = FingerprintingDetector::new(http_client.clone());
+    let api_detector = ApiDiscovery::new(http_client.clone());
+    let cloud_detector = CloudDetector::new();
 
     for port in &open_ports {
         let port_node = graph.add_node(GraphNode::Port {
@@ -188,11 +214,12 @@ async fn main() {
                 }
                 Err(e) => debug!("HTTP/2 fingerprint failed: {}", e),
             }
-        }
 
-        if let Some(bridge) = &py_bridge {
-            if [80, 443, 8080, 8443].contains(port) {
-                if let Ok(results) = bridge.run_fingerprinting(&target, *port) {
+            let scheme = if [443, 8443].contains(port) { "https" } else { "http" };
+            let url = format!("{}://{}:{}", scheme, target, port);
+
+            match fp_detector.detect(&url).await {
+                Ok(results) => {
                     if !results.detected.is_empty() {
                         info!(
                             "{} Fingerprinting: {:?}",
@@ -212,34 +239,65 @@ async fn main() {
                         }
                     }
                 }
+                Err(e) => debug!("Fingerprinting failed: {}", e),
+            }
 
-                if let Ok(api) = bridge.run_api_discovery(&target, *port) {
-                    if api.openapi.is_some() || api.graphql.is_some() {
-                        info!("{} API endpoints discovered", "[+]".green().bold());
-                    }
+            let api_results = api_detector.discover(&url).await;
+            if api_results.openapi.is_some() || api_results.graphql.is_some() {
+                info!("{} API endpoints discovered", "[+]".green().bold());
+                if let Some(openapi) = api_results.openapi {
+                    info!(
+                        "{} OpenAPI: {} ({})",
+                        "[+]".green().bold(),
+                        openapi.title,
+                        openapi.version
+                    );
                 }
-
-                if let Ok(cloud) = bridge.run_cloud_detection(&target) {
-                    if !cloud.services.is_empty() {
-                        info!(
-                            "{} Cloud services: {:?}",
-                            "[+]".green().bold(),
-                            cloud.services
-                        );
-                    }
+                if let Some(graphql) = api_results.graphql {
+                    info!("{} GraphQL: {}", "[+]".green().bold(), graphql.url);
                 }
             }
 
-            if [1883, 5683, 8080, 8883, 5684, 5685].contains(port) {
-                if let Ok(iot) = bridge.run_iot_detection(&target, &open_ports) {
-                    if !iot.iot_devices.is_empty() {
-                        info!(
-                            "{} IoT devices: {:?}",
-                            "[+]".green().bold(),
-                            iot.iot_devices
-                        );
-                    }
-                }
+            let cloud_results = cloud_detector.detect(&target);
+            if !cloud_results.services.is_empty() {
+                info!(
+                    "{} Cloud services: {:?}",
+                    "[+]".green().bold(),
+                    cloud_results.services
+                );
+            }
+        }
+
+        if [1883, 8883].contains(port) {
+            let mqtt_result = IoTDetector::detect_mqtt(&target, *port, Duration::from_secs(3)).await;
+            if mqtt_result.detected {
+                info!(
+                    "{} MQTT detected: {:?} {:?}",
+                    "[+]".green().bold(),
+                    mqtt_result.version,
+                    mqtt_result.features
+                );
+                let mqtt_node = graph.add_node(GraphNode::Service {
+                    port: *port,
+                    name: "mqtt".to_string(),
+                });
+                graph.add_edge(port_node, mqtt_node, GraphEdge::Runs);
+            }
+        }
+
+        if [5683, 5684].contains(port) {
+            let coap_result = IoTDetector::detect_coap(&target, *port, Duration::from_secs(3)).await;
+            if coap_result.detected {
+                info!(
+                    "{} CoAP detected: {:?}",
+                    "[+]".green().bold(),
+                    coap_result.resources
+                );
+                let coap_node = graph.add_node(GraphNode::Service {
+                    port: *port,
+                    name: "coap".to_string(),
+                });
+                graph.add_edge(port_node, coap_node, GraphEdge::Runs);
             }
         }
     }

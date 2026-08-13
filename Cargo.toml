@@ -14,7 +14,6 @@ tokio-tungstenite = "0.24"
 reqwest = { version = "0.12", features = ["json", "http2"] }
 futures = "0.3"
 thiserror = "1.0"
-pyo3 = { version = "0.21", features = ["extension-module", "auto-initialize"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -29,6 +28,7 @@ hex = "0.4"
 trust-dns-resolver = "0.23"
 maxminddb = "0.24"
 indicatif = "0.17"
+regex = "1"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 pnet = "0.34"

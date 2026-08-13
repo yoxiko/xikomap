@@ -1,16 +1,18 @@
 @echo off
-setlocal
-
-set "INSTALL_DIR=%USERPROFILE%\.xikomap"
-
-echo Removing from user PATH...
-powershell -Command "$path = [Environment]::GetEnvironmentVariable('PATH', 'User'); $newPath = ($path -split ';' | Where-Object { $_ -ne '%INSTALL_DIR%' }) -join ';'; [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')"
-
-echo Deleting installation directory...
-if exist "%INSTALL_DIR%" (
-    rmdir /s /q "%INSTALL_DIR%"
+echo Uninstalling xikomap...
+set "INSTALL_DIR=%USERPROFILE%\.xikomap\bin"
+if exist "%INSTALL_DIR%\xikomap.exe" (
+    del /F /Q "%INSTALL_DIR%\xikomap.exe"
+    echo Executable removed.
 )
 
-echo Uninstallation complete.
+for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "CURRENT_PATH=%%B"
+set "NEW_PATH=%CURRENT_PATH:;%INSTALL_DIR%=%"
+set "NEW_PATH=%NEW_PATH:%INSTALL_DIR%;=%"
+if not "%CURRENT_PATH%"=="%NEW_PATH%" (
+    setx Path "%NEW_PATH%"
+    echo PATH updated.
+)
+
+echo Uninstallation complete. Restart your terminal.
 pause
-endlocal

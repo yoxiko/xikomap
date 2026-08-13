@@ -57,6 +57,7 @@ impl PdfReporter {
                 (Point::new(Mm(margin), Mm(y)), false),
                 (Point::new(Mm(page_width), Mm(y)), false),
             ],
+            is_closed: false,
         });
         current_layer.set_outline_color(Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)));
         current_layer.set_outline_thickness(0.5);

@@ -6,13 +6,8 @@ if exist "%INSTALL_DIR%\xikomap.exe" (
     echo Executable removed.
 )
 
-for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "CURRENT_PATH=%%B"
-set "NEW_PATH=%CURRENT_PATH:;%INSTALL_DIR%=%"
-set "NEW_PATH=%NEW_PATH:%INSTALL_DIR%;=%"
-if not "%CURRENT_PATH%"=="%NEW_PATH%" (
-    setx Path "%NEW_PATH%"
-    echo PATH updated.
-)
+echo Updating user PATH...
+powershell -Command "$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User'); $newPath = ($currentPath -split ';' | Where-Object { $_ -ne '%INSTALL_DIR%' }) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Host 'PATH updated.'"
 
 echo Uninstallation complete. Restart your terminal.
 pause

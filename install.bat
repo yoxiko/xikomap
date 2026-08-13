@@ -23,14 +23,7 @@ echo Copying files...
 copy /Y "target\release\xikomap.exe" "%INSTALL_DIR%\xikomap.exe"
 
 echo Updating user PATH...
-for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "CURRENT_PATH=%%B"
-echo %CURRENT_PATH% | findstr /I /C:"%INSTALL_DIR%" >nul
-if %ERRORLEVEL% neq 0 (
-    setx Path "%CURRENT_PATH%;%INSTALL_DIR%"
-    echo PATH updated.
-) else (
-    echo PATH already contains the installation directory.
-)
+powershell -Command "$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ($currentPath -notlike '*%INSTALL_DIR%*') { [Environment]::SetEnvironmentVariable('Path', $currentPath + ';%INSTALL_DIR%', 'User'); Write-Host 'PATH updated successfully.' } else { Write-Host 'PATH already contains the installation directory.' }"
 
 echo Installation complete. Restart your terminal and run 'xikomap'.
 pause

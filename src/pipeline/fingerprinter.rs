@@ -1,181 +1,326 @@
-use crate::prober::{
-    dns_enumerator::DnsEnumerator, grpc_prober, http2_fingerprint::HTTP2Fingerprint,
-    quic_prober, tls_fingerprint::TLSFingerprint, websocket_prober,
-};
-use crate::python_bridge::detector::PythonDetectorBridge;
-use crate::utils::cli::Cli;
-use crate::{ServiceInfo, TechInfo};
-use futures::stream::{self, StreamExt};
-use std::net::IpAddr;
-use tracing::debug;
+use regex::Regex;
+use reqwest::Client;
+use std::collections::HashMap;
 
-pub struct Fingerprinter {
-    concurrency: usize,
-    verbose: bool,
-    target_ip: IpAddr,
+pub struct TechRule {
+    pub name: String,
+    pub patterns: Vec<Regex>,
+    pub headers: Vec<(String, String)>,
+    pub html_patterns: Vec<Regex>,
+    pub paths: Vec<String>,
 }
 
-impl Fingerprinter {
-    pub fn new(cli: &Cli, target_ip: IpAddr) -> Self {
-        Self {
-            concurrency: if cli.all { 100 } else { 50 },
-            verbose: cli.verbose,
-            target_ip,
-        }
+pub struct FingerprintingDetector {
+    client: Client,
+    rules: Vec<TechRule>,
+}
+
+pub struct FingerprintResult {
+    pub detected: Vec<String>,
+    pub versions: HashMap<String, String>,
+}
+
+impl FingerprintingDetector {
+    pub fn new(client: Client) -> Self {
+        let mut rules = Vec::new();
+
+        rules.push(TechRule {
+            name: "jQuery".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)jquery[.-]([\d.]+)\.js").unwrap(),
+                Regex::new(r"(?i)jquery/([\d.]+)").unwrap(),
+            ],
+            headers: vec![("X-Powered-By".to_string(), "jQuery".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "React".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)react(?:\.production|\.development)?\.min\.js").unwrap(),
+                Regex::new(r"(?i)__REACT").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r"(?i)data-reactroot").unwrap(),
+                Regex::new(r"(?i)__NEXT_DATA__").unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "WordPress".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)/wp-content/").unwrap(),
+                Regex::new(r"(?i)/wp-includes/").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r#"(?i)<meta name="generator" content="WordPress ([\d.]+)""#).unwrap(),
+            ],
+            paths: vec!["/wp-login.php".to_string(), "/wp-admin/".to_string()],
+        });
+
+        rules.push(TechRule {
+            name: "Bootstrap".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)bootstrap[.-]([\d.]+)\.min\.css").unwrap(),
+                Regex::new(r"(?i)bootstrap/([\d.]+)").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Vue.js".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)vue[.-]([\d.]+)\.js").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r"(?i)__vue__").unwrap(),
+                Regex::new(r#"(?i)<div id="app">"#).unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Angular".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)angular[.-]([\d.]+)\.js").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r"(?i)ng-version=").unwrap(),
+                Regex::new(r"(?i)ng-app").unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Django".to_string(),
+            patterns: vec![],
+            headers: vec![("Set-Cookie".to_string(), "csrftoken".to_string())],
+            html_patterns: vec![
+                Regex::new(r"(?i)csrfmiddlewaretoken").unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Express".to_string(),
+            patterns: vec![],
+            headers: vec![("X-Powered-By".to_string(), "Express".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Nginx".to_string(),
+            patterns: vec![],
+            headers: vec![("Server".to_string(), "nginx".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Apache".to_string(),
+            patterns: vec![],
+            headers: vec![("Server".to_string(), "Apache".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "PHP".to_string(),
+            patterns: vec![],
+            headers: vec![
+                ("X-Powered-By".to_string(), "PHP".to_string()),
+                ("Set-Cookie".to_string(), "PHPSESSID".to_string()),
+            ],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "ASP.NET".to_string(),
+            patterns: vec![],
+            headers: vec![
+                ("X-Powered-By".to_string(), "ASP.NET".to_string()),
+                ("X-AspNet-Version".to_string(), "".to_string()),
+            ],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "IIS".to_string(),
+            patterns: vec![],
+            headers: vec![("Server".to_string(), "Microsoft-IIS".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Tomcat".to_string(),
+            patterns: vec![],
+            headers: vec![("Server".to_string(), "Apache-Coyote".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Cloudflare".to_string(),
+            patterns: vec![],
+            headers: vec![
+                ("Server".to_string(), "cloudflare".to_string()),
+                ("CF-RAY".to_string(), "".to_string()),
+            ],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Akamai".to_string(),
+            patterns: vec![],
+            headers: vec![("Server".to_string(), "AkamaiGHost".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Laravel".to_string(),
+            patterns: vec![],
+            headers: vec![],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Spring".to_string(),
+            patterns: vec![],
+            headers: vec![("X-Application-Context".to_string(), "".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Ruby on Rails".to_string(),
+            patterns: vec![],
+            headers: vec![("X-Runtime".to_string(), "".to_string())],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Drupal".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)/sites/default/files").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r#"(?i)<meta name="generator" content="Drupal ([\d.]+)""#).unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Joomla".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)/media/jui").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![
+                Regex::new(r#"(?i)<meta name="generator" content="Joomla! ([\d.]+)""#).unwrap(),
+            ],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Shopify".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)cdn\.shopify\.com").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        rules.push(TechRule {
+            name: "Google Analytics".to_string(),
+            patterns: vec![
+                Regex::new(r"(?i)google-analytics\.com").unwrap(),
+                Regex::new(r"(?i)gtag/js").unwrap(),
+            ],
+            headers: vec![],
+            html_patterns: vec![],
+            paths: vec![],
+        });
+
+        Self { client, rules }
     }
 
-    pub async fn analyze(&self, target: &str, ports: &[u16]) -> Vec<ServiceInfo> {
-        let py_bridge = PythonDetectorBridge::new().ok();
-        let quic_endpoint = quic_prober::create_quic_endpoint();
-
-        stream::iter(ports.iter().copied())
-            .map(|port| {
-                self.probe_single_port(target, port, py_bridge.as_ref(), quic_endpoint.as_ref())
-            })
-            .buffer_unordered(self.concurrency)
-            .collect()
-            .await
-    }
-
-    async fn probe_single_port(
-        &self,
-        target: &str,
-        port: u16,
-        py_bridge: Option<&PythonDetectorBridge>,
-        quic_endpoint: Option<&quinn::Endpoint>,
-    ) -> ServiceInfo {
-        let mut service = ServiceInfo {
-            port,
-            protocol: None,
-            technologies: Vec::new(),
+    pub async fn detect(&self, url: &str) -> Result<FingerprintResult, reqwest::Error> {
+        let mut results = FingerprintResult {
+            detected: Vec::new(),
+            versions: HashMap::new(),
         };
 
-        let (ws, grpc, tls, http2, quic, py_finger) = tokio::join!(
-            self.try_websocket(target, port),
-            self.try_grpc(target, port),
-            self.try_tls(target, port),
-            self.try_http2(target, port),
-            self.try_quic(target, port, quic_endpoint),
-            self.try_python_finger(target, port, py_bridge),
-        );
+        let response = self.client.get(url).send().await?;
+        let headers = response.headers().clone();
+        let html = response.text().await?;
 
-        if let Some(ws) = ws {
-            service.protocol = Some("websocket".into());
-            service.technologies.push(ws);
-        }
-        if let Some(grpc) = grpc {
-            service.protocol = Some("grpc".into());
-            service.technologies.push(grpc);
-        }
-        if let Some(tls) = tls {
-            service.technologies.push(tls);
-        }
-        if let Some(h2) = http2 {
-            service.technologies.push(h2);
-        }
-        if let Some(q) = quic {
-            service.technologies.push(q);
-        }
-        if let Some(mut py) = py_finger {
-            service.technologies.append(&mut py);
-        }
+        for rule in &self.rules {
+            let mut detected = false;
+            let mut version = None;
 
-        service
-    }
-
-    async fn try_websocket(&self, target: &str, port: u16) -> Option<TechInfo> {
-        websocket_prober::probe_websocket(target, port)
-            .await
-            .map(|ws| TechInfo {
-                name: format!("websocket@{}{}", ws.scheme, ws.path),
-                version: None,
-            })
-    }
-
-    async fn try_grpc(&self, target: &str, port: u16) -> Option<TechInfo> {
-        let client = reqwest::Client::builder()
-            .http2_prior_knowledge()
-            .timeout(std::time::Duration::from_secs(4))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .ok()?;
-        grpc_prober::probe_grpc(target, port, &client)
-            .await
-            .map(|grpc| TechInfo {
-                name: "grpc".into(),
-                version: Some(grpc.status.to_string()),
-            })
-    }
-
-    async fn try_tls(&self, target: &str, port: u16) -> Option<TechInfo> {
-        if ![443, 8443, 9443].contains(&port) {
-            return None;
-        }
-        TLSFingerprint::analyze(target, port).ok().and_then(|fp| {
-            fp.ja3.map(|ja3| TechInfo {
-                name: "TLS/JA3".into(),
-                version: Some(ja3),
-            })
-        })
-    }
-
-    async fn try_http2(&self, target: &str, port: u16) -> Option<TechInfo> {
-        if ![80, 443, 8080, 8443].contains(&port) {
-            return None;
-        }
-        HTTP2Fingerprint::analyze(target, port)
-            .await
-            .ok()
-            .and_then(|fp| {
-                if fp.alpn.is_empty() {
-                    None
-                } else {
-                    Some(TechInfo {
-                        name: "HTTP/2".into(),
-                        version: Some(fp.alpn.join(",")),
-                    })
+            for pattern in &rule.patterns {
+                if let Some(caps) = pattern.captures(&html) {
+                    detected = true;
+                    if let Some(v) = caps.get(1) {
+                        version = Some(v.as_str().to_string());
+                    }
+                    break;
                 }
-            })
-    }
+            }
 
-    async fn try_quic(
-        &self,
-        target: &str,
-        port: u16,
-        endpoint: Option<&quinn::Endpoint>,
-    ) -> Option<TechInfo> {
-        if ![443, 8443].contains(&port) {
-            return None;
-        }
-        let ep = endpoint?;
-        quic_prober::probe_quic(target, port, ep)
-            .await
-            .map(|q| TechInfo {
-                name: format!("QUIC/{}", q.protocol),
-                version: Some(q.alpn.join(",")),
-            })
-    }
+            if !detected {
+                for (key, val) in &rule.headers {
+                    if let Some(header_val) = headers.get(key) {
+                        if let Ok(s) = header_val.to_str() {
+                            if val.is_empty() || s.to_lowercase().contains(&val.to_lowercase()) {
+                                detected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 
-    async fn try_python_finger(
-        &self,
-        target: &str,
-        port: u16,
-        bridge: Option<&PythonDetectorBridge>,
-    ) -> Option<Vec<TechInfo>> {
-        let bridge = bridge?;
-        if ![80, 443, 8080, 8443].contains(&port) {
-            return None;
+            if !detected {
+                for pattern in &rule.html_patterns {
+                    if pattern.is_match(&html) {
+                        detected = true;
+                        if let Some(caps) = pattern.captures(&html) {
+                            if let Some(v) = caps.get(1) {
+                                version = Some(v.as_str().to_string());
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if detected {
+                results.detected.push(rule.name.clone());
+                if let Some(v) = version {
+                    results.versions.insert(rule.name.clone(), v);
+                }
+            }
         }
-        let results = bridge.run_fingerprinting(target, port).ok()?;
-        Some(
-            results
-                .detected
-                .into_iter()
-                .map(|tech| TechInfo {
-                    name: tech.clone(),
-                    version: results.versions.get(&tech).cloned(),
-                })
-                .collect(),
-        )
+
+        Ok(results)
     }
 }

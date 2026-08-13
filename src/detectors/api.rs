@@ -1,23 +1,27 @@
 use reqwest::Client;
 use serde_json::Value;
 
+#[derive(Clone)]
 pub struct ApiDiscovery {
     client: Client,
     common_paths: Vec<&'static str>,
 }
 
+#[derive(Clone)]
 pub struct ApiResult {
     pub openapi: Option<OpenApiSpec>,
     pub graphql: Option<GraphQLInfo>,
     pub endpoints: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct OpenApiSpec {
     pub url: String,
     pub version: String,
     pub title: String,
 }
 
+#[derive(Clone)]
 pub struct GraphQLInfo {
     pub url: String,
     pub introspection: bool,

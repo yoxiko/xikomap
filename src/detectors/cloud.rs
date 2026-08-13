@@ -77,6 +77,27 @@ impl CloudDetector {
         ];
         rules.push(("Netlify".to_string(), netlify));
 
+        let digitalocean = vec![
+            Regex::new(r"(?i)\.ondigitalocean\.app").unwrap(),
+            Regex::new(r"(?i)\.do\.digitalocean\.com").unwrap(),
+        ];
+        rules.push(("DigitalOcean".to_string(), digitalocean));
+
+        let oracle_cloud = vec![
+            Regex::new(r"(?i)\.oraclecloud\.com").unwrap(),
+        ];
+        rules.push(("Oracle Cloud".to_string(), oracle_cloud));
+
+        let ibm_cloud = vec![
+            Regex::new(r"(?i)\.mybluemix\.net").unwrap(),
+        ];
+        rules.push(("IBM Cloud".to_string(), ibm_cloud));
+
+        let linode = vec![
+            Regex::new(r"(?i)\.linode\.com").unwrap(),
+        ];
+        rules.push(("Linode".to_string(), linode));
+
         Self { rules }
     }
 
@@ -97,7 +118,7 @@ impl CloudDetector {
                 if pattern.is_match(target) {
                     result.services.push(service.clone());
 
-                    if service.contains("CloudFront") || service.contains("CDN") {
+                    if service.contains("CloudFront") || service.contains("CDN") || service.contains("Akamai") {
                         result.cdn = Some(service.clone());
                     } else {
                         result.hosting = Some(service.clone());

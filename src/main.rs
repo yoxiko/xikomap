@@ -6,6 +6,8 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
+use crate::detectors::api::ApiResult;
+use crate::detectors::cloud::CloudResult;
 use crate::detectors::{ApiDiscovery, CloudDetector, FingerprintingDetector, IoTDetector};
 use crate::prober::{
     dns_enumerator::DnsEnumerator, grpc_prober, http2_fingerprint::HTTP2Fingerprint, quic_prober,
@@ -45,11 +47,9 @@ async fn main() {
         info!("Target ports: {:?}", ports);
     }
 
+    let scan_type_str = if cli.stealth { "SYN (stealth)" } else { "Connect" };
     info!("Starting advanced scan for target: {}", target);
-    info!(
-        "Scan type: {}",
-        if cli.stealth { "SYN (stealth)" } else { "Connect" }
-    );
+    info!("Scan type: {}", scan_type_str);
 
     let target_ip = match format!("{}:0", target).to_socket_addrs() {
         Ok(mut addrs) => addrs.next().map(|a| a.ip()),
@@ -124,6 +124,21 @@ async fn main() {
     let fp_detector = FingerprintingDetector::new(http_client.clone());
     let api_detector = ApiDiscovery::new(http_client.clone());
     let cloud_detector = CloudDetector::new();
+
+    let mut all_technologies: Vec<(String, String)> = Vec::new();
+    let mut all_api_results = ApiResult {
+        openapi: None,
+        graphql: None,
+        endpoints: Vec::new(),
+    };
+    let mut all_cloud_results = CloudResult {
+        services: Vec::new(),
+        cdn: None,
+        hosting: None,
+        buckets: Vec::new(),
+        ip: None,
+        hostname: None,
+    };
 
     for port in &open_ports {
         let port_node = graph.add_node(GraphNode::Port {
@@ -229,13 +244,17 @@ async fn main() {
                             results.detected
                         );
                         for tech in &results.detected {
+                            let version = results
+                                .versions
+                                .get(tech)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            all_technologies.push((tech.clone(), version.clone()));
+
                             let tech_node = graph.add_node(GraphNode::Technology {
                                 name: tech.clone(),
-                                version: results
-                                    .versions
-                                    .get(tech)
-                                    .cloned()
-                                    .unwrap_or_else(|| "unknown".to_string()),
+                                version: version.clone(),
                             });
                             graph.add_edge(port_node, tech_node, GraphEdge::Uses);
                         }
@@ -247,17 +266,20 @@ async fn main() {
             let api_results = api_detector.discover(&url).await;
             if api_results.openapi.is_some() || api_results.graphql.is_some() {
                 info!("{} API endpoints discovered", "[+]".green().bold());
-                if let Some(openapi) = api_results.openapi {
+                if let Some(openapi) = &api_results.openapi {
                     info!(
                         "{} OpenAPI: {} ({})",
                         "[+]".green().bold(),
                         openapi.title,
                         openapi.version
                     );
+                    all_api_results.openapi = Some(openapi.clone());
                 }
-                if let Some(graphql) = api_results.graphql {
+                if let Some(graphql) = &api_results.graphql {
                     info!("{} GraphQL: {}", "[+]".green().bold(), graphql.url);
+                    all_api_results.graphql = Some(graphql.clone());
                 }
+                all_api_results.endpoints.extend(api_results.endpoints.clone());
             }
 
             let cloud_results = cloud_detector.detect(&target);
@@ -267,11 +289,13 @@ async fn main() {
                     "[+]".green().bold(),
                     cloud_results.services
                 );
+                all_cloud_results = cloud_results;
             }
         }
 
         if [1883, 8883].contains(port) {
-            let mqtt_result = IoTDetector::detect_mqtt(&target, *port, Duration::from_secs(3)).await;
+            let mqtt_result =
+                IoTDetector::detect_mqtt(&target, *port, Duration::from_secs(3)).await;
             if mqtt_result.detected {
                 info!(
                     "{} MQTT detected: {:?} {:?}",
@@ -288,7 +312,8 @@ async fn main() {
         }
 
         if [5683, 5684].contains(port) {
-            let coap_result = IoTDetector::detect_coap(&target, *port, Duration::from_secs(3)).await;
+            let coap_result =
+                IoTDetector::detect_coap(&target, *port, Duration::from_secs(3)).await;
             if coap_result.detected {
                 info!(
                     "{} CoAP detected: {:?}",
@@ -337,7 +362,16 @@ async fn main() {
 
     if cli.export_pdf {
         let pdf_output = format!("{}_report.pdf", safe_target_name);
-        match pdf_reporter::PdfReporter::generate(&graph, &target, &pdf_output) {
+        match pdf_reporter::PdfReporter::generate(
+            &graph,
+            &target,
+            &pdf_output,
+            scan_type_str,
+            &open_ports,
+            &all_technologies,
+            &all_api_results,
+            &all_cloud_results,
+        ) {
             Ok(_) => info!("PDF report saved to: {}", pdf_output),
             Err(e) => error!("Failed to generate PDF: {}", e),
         }

@@ -2,15 +2,24 @@
 echo Checking prerequisites...
 where cargo >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo Cargo is not installed. Please install Rust from https://rustup.rs/
+    echo [!] Cargo is not installed. Please install Rust from https://rustup.rs/
     pause
     exit /b 1
+)
+
+echo Checking Npcap...
+reg query "HKLM\SYSTEM\CurrentControlSet\Services\Npcap" >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+    echo [!] Npcap is not installed or not detected.
+    echo SYN Stealth scan requires Npcap. Please download and install it from https://npcap.com/
+    echo Make sure to check "Install Npcap in WinPcap API-compatible Mode" during installation.
+    pause
 )
 
 echo Building xikomap in release mode...
 cargo build --release
 if %ERRORLEVEL% neq 0 (
-    echo Build failed.
+    echo [!] Build failed.
     pause
     exit /b 1
 )
@@ -25,5 +34,5 @@ copy /Y "target\release\xikomap.exe" "%INSTALL_DIR%\xikomap.exe"
 echo Updating user PATH...
 powershell -Command "$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ($currentPath -notlike '*%INSTALL_DIR%*') { [Environment]::SetEnvironmentVariable('Path', $currentPath + ';%INSTALL_DIR%', 'User'); Write-Host 'PATH updated successfully.' } else { Write-Host 'PATH already contains the installation directory.' }"
 
-echo Installation complete. Restart your terminal and run 'xikomap'.
+echo [+] Installation complete. Restart your terminal and run 'xikomap'.
 pause

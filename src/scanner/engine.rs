@@ -1,5 +1,5 @@
 use futures::stream::{self, StreamExt};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -26,8 +26,9 @@ impl ScannerEngine {
     }
 
     pub async fn run(&self, target: &str, ports: Vec<u16>) -> Result<Vec<u16>, ScanError> {
-        let addrs: Vec<SocketAddr> = format!("{}:0", target)
-            .to_socket_addrs()
+        // FIX 1: Async DNS resolution instead of blocking to_socket_addrs
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:0", target))
+            .await
             .map_err(|e| ScanError::Resolution(e.to_string()))?
             .map(|mut a| {
                 a.set_port(0);

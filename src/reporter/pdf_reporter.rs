@@ -8,6 +8,7 @@ use std::io::BufWriter;
 pub struct PdfReporter;
 
 impl PdfReporter {
+    #[allow(unused_mut, unused_assignments)]
     pub fn generate(
         graph: &ReconGraph,
         target: &str,
@@ -18,15 +19,28 @@ impl PdfReporter {
         api_results: &ApiResult,
         cloud_results: &CloudResult,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (doc, page1, layer1) =
+        let (mut doc, mut current_page, mut current_layer_idx) =
             PdfDocument::new("Xikomap Report", Mm(210.0), Mm(297.0), "Layer 1");
-        let current_layer = doc.get_page(page1).get_layer(layer1);
+        let mut current_layer = doc.get_page(current_page).get_layer(current_layer_idx);
         let font = doc.add_builtin_font(BuiltinFont::Helvetica)?;
         let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)?;
 
         let mut y = 280.0;
         let margin = 20.0;
         let page_width = 190.0;
+
+        // FIX 8: Pagination macro to handle text going off the page
+        macro_rules! check_page {
+            ($needed_height:expr) => {
+                if y < $needed_height {
+                    let (new_page, new_layer) = doc.add_page(Mm(210.0), Mm(297.0), "Layer 1");
+                    current_page = new_page;
+                    current_layer_idx = new_layer;
+                    current_layer = doc.get_page(current_page).get_layer(current_layer_idx);
+                    y = 280.0;
+                }
+            };
+        }
 
         current_layer.use_text(
             "Xikomap Reconnaissance Report",
@@ -39,10 +53,7 @@ impl PdfReporter {
         current_layer.use_text(&format!("Target: {}", target), 12.0, Mm(margin), Mm(y), &font);
         y -= 6.0;
         current_layer.use_text(
-            &format!(
-                "Date: {}",
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
-            ),
+            &format!("Date: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")),
             12.0,
             Mm(margin),
             Mm(y),
@@ -101,12 +112,11 @@ impl PdfReporter {
         y -= 15.0;
 
         if !technologies.is_empty() {
+            check_page!(40.0);
             current_layer.use_text("Technologies & Fingerprinting", 16.0, Mm(margin), Mm(y), &font_bold);
             y -= 8.0;
             for (tech, version) in technologies {
-                if y < 20.0 {
-                    break;
-                }
+                check_page!(20.0);
                 current_layer.use_text(
                     &format!("- {} ({})", tech, version),
                     11.0,
@@ -123,39 +133,36 @@ impl PdfReporter {
             || api_results.openapi.is_some()
             || api_results.graphql.is_some()
         {
+            check_page!(40.0);
             current_layer.use_text("API Discovery", 16.0, Mm(margin), Mm(y), &font_bold);
             y -= 8.0;
 
             if let Some(openapi) = &api_results.openapi {
-                if y > 20.0 {
-                    current_layer.use_text(
-                        &format!("OpenAPI: {} (v{})", openapi.title, openapi.version),
-                        11.0,
-                        Mm(margin),
-                        Mm(y),
-                        &font,
-                    );
-                    y -= 6.0;
-                }
+                check_page!(20.0);
+                current_layer.use_text(
+                    &format!("OpenAPI: {} (v{})", openapi.title, openapi.version),
+                    11.0,
+                    Mm(margin),
+                    Mm(y),
+                    &font,
+                );
+                y -= 6.0;
             }
 
             if let Some(graphql) = &api_results.graphql {
-                if y > 20.0 {
-                    current_layer.use_text(
-                        &format!("GraphQL Endpoint: {}", graphql.url),
-                        11.0,
-                        Mm(margin),
-                        Mm(y),
-                        &font,
-                    );
-                    y -= 6.0;
-                }
+                check_page!(20.0);
+                current_layer.use_text(
+                    &format!("GraphQL Endpoint: {}", graphql.url),
+                    11.0,
+                    Mm(margin),
+                    Mm(y),
+                    &font,
+                );
+                y -= 6.0;
             }
 
-            for endpoint in api_results.endpoints.iter().take(20) {
-                if y < 20.0 {
-                    break;
-                }
+            for endpoint in api_results.endpoints.iter().take(100) {
+                check_page!(20.0);
                 current_layer.use_text(&format!("  {}", endpoint), 10.0, Mm(margin), Mm(y), &font);
                 y -= 5.0;
             }
@@ -163,26 +170,23 @@ impl PdfReporter {
         }
 
         if !cloud_results.services.is_empty() {
+            check_page!(40.0);
             current_layer.use_text("Cloud Infrastructure", 16.0, Mm(margin), Mm(y), &font_bold);
             y -= 8.0;
             for service in &cloud_results.services {
-                if y < 20.0 {
-                    break;
-                }
+                check_page!(20.0);
                 current_layer.use_text(&format!("- {}", service), 11.0, Mm(margin), Mm(y), &font);
                 y -= 6.0;
             }
             if let Some(ip) = &cloud_results.ip {
-                if y > 20.0 {
-                    current_layer.use_text(
-                        &format!("Resolved IP: {}", ip),
-                        11.0,
-                        Mm(margin),
-                        Mm(y),
-                        &font,
-                    );
-                    y -= 6.0;
-                }
+                check_page!(20.0);
+                current_layer.use_text(
+                    &format!("Resolved IP: {}", ip),
+                    11.0,
+                    Mm(margin),
+                    Mm(y),
+                    &font,
+                );
             }
         }
 

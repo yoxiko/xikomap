@@ -1,29 +1,39 @@
-#![allow(dead_code, unused_imports)]
-
-use colored::Colorize;
-use std::net::ToSocketAddrs;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
-
-use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
-use crate::detectors::api::ApiResult;
-use crate::detectors::cloud::CloudResult;
-use crate::detectors::{ApiDiscovery, CloudDetector, FingerprintingDetector, IoTDetector};
-use crate::prober::{
-    dns_enumerator::DnsEnumerator, grpc_prober, http2_fingerprint::HTTP2Fingerprint, quic_prober,
-    tls_fingerprint::TLSFingerprint, websocket_prober,
-};
-use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
-use crate::scanner::{ScannerEngine, SynScanner};
-use crate::utils::{cli::Cli, logger::init_logger, logo::print_logo};
-use clap::Parser;
-
 mod core;
 mod detectors;
 mod prober;
 mod reporter;
 mod scanner;
 mod utils;
+
+use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
+use crate::detectors::api::{ApiDiscovery, ApiResult};
+use crate::detectors::cloud::{CloudDetector, CloudResult};
+use crate::detectors::fingerprinting::FingerprintingDetector;
+use crate::detectors::iot::IoTDetector;
+use crate::prober::dns_enumerator::DnsEnumerator;
+use crate::prober::grpc as grpc_prober;
+use crate::prober::http2_fingerprint::HTTP2Fingerprint;
+use crate::prober::quic as quic_prober;
+use crate::prober::tls_fingerprint::TLSFingerprint; 
+use crate::prober::websocket as websocket_prober;
+use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
+use crate::scanner::{ScannerEngine, SynScanner};
+use crate::utils::cli::Cli;
+use crate::utils::logo::print_logo;
+use crate::utils::logger::init_logger;
+use clap::Parser;
+use colored::Colorize;
+use std::process;
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
+
+fn format_url(target: &str, port: u16, scheme: &str) -> String {
+    if target.contains(':') && !target.contains('[') {
+        format!("{}://[{}]:{}", scheme, target, port)
+    } else {
+        format!("{}://{}:{}", scheme, target, port)
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -51,9 +61,12 @@ async fn main() {
     info!("Starting advanced scan for target: {}", target);
     info!("Scan type: {}", scan_type_str);
 
-    let target_ip = match format!("{}:0", target).to_socket_addrs() {
+    let target_ip = match tokio::net::lookup_host(format!("{}:0", target)).await {
         Ok(mut addrs) => addrs.next().map(|a| a.ip()),
-        Err(_) => None,
+        Err(e) => {
+            error!("DNS resolution failed: {}", e);
+            process::exit(1);
+        }
     };
 
     let open_ports = if cli.stealth {
@@ -67,7 +80,7 @@ async fn main() {
                         Ok(p) => p,
                         Err(e) => {
                             error!("Scan failed: {}", e);
-                            return;
+                            process::exit(1);
                         }
                     }
                 }
@@ -79,7 +92,7 @@ async fn main() {
                 Ok(p) => p,
                 Err(e) => {
                     error!("Scan failed: {}", e);
-                    return;
+                    process::exit(1);
                 }
             }
         }
@@ -89,7 +102,7 @@ async fn main() {
             Ok(p) => p,
             Err(e) => {
                 error!("Scan failed: {}", e);
-                return;
+                process::exit(1);
             }
         }
     };
@@ -112,7 +125,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create HTTP client: {}", e);
-            return;
+            process::exit(1);
         }
     };
 
@@ -123,14 +136,7 @@ async fn main() {
 
     let fp_detector = FingerprintingDetector::new(http_client.clone());
     let api_detector = ApiDiscovery::new(http_client.clone());
-    let cloud_detector = CloudDetector::new();
 
-    let mut all_technologies: Vec<(String, String)> = Vec::new();
-    let mut all_api_results = ApiResult {
-        openapi: None,
-        graphql: None,
-        endpoints: Vec::new(),
-    };
     let mut all_cloud_results = CloudResult {
         services: Vec::new(),
         cdn: None,
@@ -138,6 +144,39 @@ async fn main() {
         buckets: Vec::new(),
         ip: None,
         hostname: None,
+    };
+
+    let cloud_detector = CloudDetector::new();
+    let cloud_results = cloud_detector.detect(&target);
+    if !cloud_results.services.is_empty() {
+        info!(
+            "{} Cloud services: {:?}",
+            "[+]".green().bold(),
+            cloud_results.services
+        );
+        all_cloud_results = cloud_results;
+    }
+
+    if let Ok(dns_enum) = DnsEnumerator::new() {
+        let subdomains = dns_enum.enumerate_subdomains(&target).await;
+        if !subdomains.is_empty() {
+            info!(
+                "{} Found {} subdomains",
+                "[+]".green().bold(),
+                subdomains.len()
+            );
+            for subdomain in subdomains.iter().take(10) {
+                let subdomain_node = graph.add_node(GraphNode::Domain(subdomain.clone()));
+                graph.add_edge(target_node, subdomain_node, GraphEdge::Related);
+            }
+        }
+    }
+
+    let mut all_technologies: Vec<(String, String)> = Vec::new();
+    let mut all_api_results = ApiResult {
+        openapi: None,
+        graphql: None,
+        endpoints: Vec::new(),
     };
 
     for port in &open_ports {
@@ -233,7 +272,7 @@ async fn main() {
             }
 
             let scheme = if [443, 8443].contains(port) { "https" } else { "http" };
-            let url = format!("{}://{}:{}", scheme, target, port);
+            let url = format_url(&target, *port, scheme);
 
             match fp_detector.detect(&url).await {
                 Ok(results) => {
@@ -281,16 +320,6 @@ async fn main() {
                 }
                 all_api_results.endpoints.extend(api_results.endpoints.clone());
             }
-
-            let cloud_results = cloud_detector.detect(&target);
-            if !cloud_results.services.is_empty() {
-                info!(
-                    "{} Cloud services: {:?}",
-                    "[+]".green().bold(),
-                    cloud_results.services
-                );
-                all_cloud_results = cloud_results;
-            }
         }
 
         if [1883, 8883].contains(port) {
@@ -325,21 +354,6 @@ async fn main() {
                     name: "coap".to_string(),
                 });
                 graph.add_edge(port_node, coap_node, GraphEdge::Runs);
-            }
-        }
-    }
-
-    if let Ok(dns_enum) = DnsEnumerator::new() {
-        let subdomains = dns_enum.enumerate_subdomains(&target).await;
-        if !subdomains.is_empty() {
-            info!(
-                "{} Found {} subdomains",
-                "[+]".green().bold(),
-                subdomains.len()
-            );
-            for subdomain in subdomains.iter().take(10) {
-                let subdomain_node = graph.add_node(GraphNode::Domain(subdomain.clone()));
-                graph.add_edge(target_node, subdomain_node, GraphEdge::Related);
             }
         }
     }

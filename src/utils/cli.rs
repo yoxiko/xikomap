@@ -1,27 +1,29 @@
 use clap::Parser;
 
-#[derive(Parser, Debug)]
-#[command(name = "xikomap")]
-#[command(about = "Advanced network reconnaissance tool", long_about = None)]
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about = "Advanced network reconnaissance tool", long_about = None)]
 pub struct Cli {
-    #[arg(help = "Target host (IP or domain)")]
+    #[arg(short, long)]
     pub target: String,
 
-    #[arg(short = 'p', long, value_delimiter = ',', help = "Comma-separated list of ports")]
+    #[arg(short, long, value_delimiter = ',')]
     pub ports: Vec<u16>,
 
-    #[arg(long, help = "Scan all 65535 ports")]
+    #[arg(long)]
     pub all: bool,
 
-    #[arg(short = 's', long = "stealth", help = "Use SYN stealth scan")]
+    #[arg(long)]
     pub stealth: bool,
 
-    #[arg(short = 'v', long, help = "Verbose output")]
+    #[arg(short, long)]
     pub verbose: bool,
 
-    #[arg(short = 'x', long = "export-json", help = "Export results to JSON")]
+    #[arg(long)]
     pub export_json: bool,
 
-    #[arg(short = 'P', long = "export-pdf", help = "Export results to PDF")]
+    #[arg(long)]
     pub export_pdf: bool,
+
+    #[arg(long)]
+    pub screenshot: bool,
 }

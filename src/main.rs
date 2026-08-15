@@ -1,10 +1,11 @@
+#![allow(dead_code)]
+
 mod core;
 mod detectors;
 mod prober;
 mod reporter;
 mod scanner;
 mod utils;
-
 use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
 use crate::detectors::api::{ApiDiscovery, ApiResult};
 use crate::detectors::cloud::{CloudDetector, CloudResult};
@@ -13,14 +14,19 @@ use crate::detectors::iot::IoTDetector;
 use crate::prober::dns_enumerator::DnsEnumerator;
 use crate::prober::grpc as grpc_prober;
 use crate::prober::http2_fingerprint::HTTP2Fingerprint;
+use crate::prober::jarm::JarmScanner;
 use crate::prober::quic as quic_prober;
-use crate::prober::tls_fingerprint::TLSFingerprint; 
+use crate::prober::rdns::RdnsProber;
+use crate::prober::screenshot::ScreenshotCapture;
+use crate::prober::security_headers::SecurityHeadersAnalyzer;
+use crate::prober::ssh_fingerprint::SshProber;
+use crate::prober::tls_fingerprint::TLSFingerprint;
 use crate::prober::websocket as websocket_prober;
 use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
 use crate::scanner::{ScannerEngine, SynScanner};
 use crate::utils::cli::Cli;
-use crate::utils::logo::print_logo;
 use crate::utils::logger::init_logger;
+use crate::utils::logo::print_logo;
 use clap::Parser;
 use colored::Colorize;
 use std::process;
@@ -136,6 +142,7 @@ async fn main() {
 
     let fp_detector = FingerprintingDetector::new(http_client.clone());
     let api_detector = ApiDiscovery::new(http_client.clone());
+    let security_analyzer = SecurityHeadersAnalyzer::new(http_client.clone());
 
     let mut all_cloud_results = CloudResult {
         services: Vec::new(),
@@ -178,6 +185,31 @@ async fn main() {
         graphql: None,
         endpoints: Vec::new(),
     };
+    let mut all_ssh_results = Vec::new();
+    let mut all_jarm_results = Vec::new();
+    let mut all_security_results = Vec::new();
+    let mut all_ptr_results = Vec::new();
+    let mut all_screenshot_results = Vec::new();
+
+    if let Some(ip) = target_ip {
+        let rdns_prober = RdnsProber::new();
+        if let Some(prober) = rdns_prober {
+            if let Some(ptr) = prober.lookup(&ip.to_string()).await {
+                info!(
+                    "{} PTR record: {} -> {}",
+                    "[+]".green().bold(),
+                    ptr.ip,
+                    ptr.hostname
+                );
+                let ptr_node = graph.add_node(GraphNode::PtrRecord {
+                    ip: ptr.ip.clone(),
+                    hostname: ptr.hostname.clone(),
+                });
+                graph.add_edge(target_node, ptr_node, GraphEdge::ResolvesTo);
+                all_ptr_results.push(ptr);
+            }
+        }
+    }
 
     for port in &open_ports {
         let port_node = graph.add_node(GraphNode::Port {
@@ -190,6 +222,43 @@ async fn main() {
             debug!("{} Open TCP port: {}", "[+]".green().bold(), port);
         } else {
             info!("{} Open TCP port: {}", "[+]".green().bold(), port);
+        }
+
+        if [22, 2222, 2200, 8022].contains(port) {
+            if let Some(ssh_fp) = SshProber::probe(&target, *port).await {
+                info!(
+                    "{} SSH: {} {} (banner: {})",
+                    "[+]".green().bold(),
+                    ssh_fp.software,
+                    ssh_fp.version,
+                    ssh_fp.banner
+                );
+                let ssh_node = graph.add_node(GraphNode::SshService {
+                    port: *port,
+                    banner: ssh_fp.banner.clone(),
+                    software: ssh_fp.software.clone(),
+                    version: ssh_fp.version.clone(),
+                });
+                graph.add_edge(port_node, ssh_node, GraphEdge::Runs);
+                all_ssh_results.push(ssh_fp);
+            }
+        }
+
+        if [443, 8443, 4443].contains(port) {
+            if let Some(jarm) = JarmScanner::scan(&target, *port).await {
+                info!(
+                    "{} JARM: {} (port {})",
+                    "[+]".green().bold(),
+                    &jarm.hash[..16],
+                    port
+                );
+                let jarm_node = graph.add_node(GraphNode::JarmHash {
+                    port: *port,
+                    hash: jarm.hash.clone(),
+                });
+                graph.add_edge(port_node, jarm_node, GraphEdge::Uses);
+                all_jarm_results.push(jarm);
+            }
         }
 
         if cli.all || [80, 443, 8080, 8443, 3000, 8000, 9090, 50051, 10000].contains(port) {
@@ -273,6 +342,43 @@ async fn main() {
 
             let scheme = if [443, 8443].contains(port) { "https" } else { "http" };
             let url = format_url(&target, *port, scheme);
+
+            if let Some(sec_result) = security_analyzer.analyze(&url).await {
+                info!(
+                    "{} Security Headers: grade {} ({}/{})",
+                    "[+]".green().bold(),
+                    sec_result.grade,
+                    sec_result.total_score,
+                    sec_result.max_total_score
+                );
+                let sec_node = graph.add_node(GraphNode::SecurityGrade {
+                    url: url.clone(),
+                    grade: sec_result.grade.clone(),
+                    score: sec_result.total_score,
+                    max_score: sec_result.max_total_score,
+                });
+                graph.add_edge(port_node, sec_node, GraphEdge::Uses);
+                all_security_results.push(sec_result);
+            }
+
+            if cli.screenshot {
+                let safe_name = target.replace(['.', ':', '/'], "_");
+                if let Some(ss) = ScreenshotCapture::capture(&url, "./screenshots", &safe_name, *port).await {
+                    info!(
+                        "{} Screenshot saved: {} (title: {})",
+                        "[+]".green().bold(),
+                        ss.file_path,
+                        ss.title
+                    );
+                    let ss_node = graph.add_node(GraphNode::Screenshot {
+                        url: ss.url.clone(),
+                        file_path: ss.file_path.clone(),
+                        title: ss.title.clone(),
+                    });
+                    graph.add_edge(port_node, ss_node, GraphEdge::HasScreenshot);
+                    all_screenshot_results.push(ss);
+                }
+            }
 
             match fp_detector.detect(&url).await {
                 Ok(results) => {
@@ -385,6 +491,11 @@ async fn main() {
             &all_technologies,
             &all_api_results,
             &all_cloud_results,
+            &all_ssh_results,
+            &all_jarm_results,
+            &all_security_results,
+            &all_ptr_results,
+            &all_screenshot_results,
         ) {
             Ok(_) => info!("PDF report saved to: {}", pdf_output),
             Err(e) => error!("Failed to generate PDF: {}", e),

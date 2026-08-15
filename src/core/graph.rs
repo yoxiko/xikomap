@@ -9,6 +9,11 @@ pub enum GraphNode {
     Technology { name: String, version: String },
     Subdomain(String),
     Vulnerability { cve: String, severity: String },
+    SshService { port: u16, banner: String, software: String, version: String },
+    JarmHash { port: u16, hash: String },
+    SecurityGrade { url: String, grade: String, score: u32, max_score: u32 },
+    PtrRecord { ip: String, hostname: String },
+    Screenshot { url: String, file_path: String, title: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +23,8 @@ pub enum GraphEdge {
     Uses,
     Related,
     Exposes,
+    ResolvesTo,
+    HasScreenshot,
 }
 
 pub struct ReconGraph {
@@ -55,6 +62,17 @@ impl ReconGraph {
         self.graph.edge_weights()
     }
 
+    pub fn get_edges(&self) -> Vec<(usize, usize, &GraphEdge)> {
+        self.graph
+            .edge_indices()
+            .map(|idx| {
+                let (from, to) = self.graph.edge_endpoints(idx).unwrap();
+                let edge = self.graph.edge_weight(idx).unwrap();
+                (from.index(), to.index(), edge)
+            })
+            .collect()
+    }
+
     pub fn export_to_json(&self) -> Result<String, serde_json::Error> {
         let nodes: Vec<serde_json::Value> = self
             .graph
@@ -68,6 +86,11 @@ impl ReconGraph {
                     GraphNode::Technology { .. } => "technology",
                     GraphNode::Subdomain(_) => "subdomain",
                     GraphNode::Vulnerability { .. } => "vulnerability",
+                    GraphNode::SshService { .. } => "ssh_service",
+                    GraphNode::JarmHash { .. } => "jarm_hash",
+                    GraphNode::SecurityGrade { .. } => "security_grade",
+                    GraphNode::PtrRecord { .. } => "ptr_record",
+                    GraphNode::Screenshot { .. } => "screenshot",
                 };
                 serde_json::json!({
                     "id": i,
@@ -114,6 +137,11 @@ impl ReconGraph {
                 GraphNode::Technology { .. } => "technology",
                 GraphNode::Subdomain(_) => "subdomain",
                 GraphNode::Vulnerability { .. } => "vulnerability",
+                GraphNode::SshService { .. } => "ssh_service",
+                GraphNode::JarmHash { .. } => "jarm_hash",
+                GraphNode::SecurityGrade { .. } => "security_grade",
+                GraphNode::PtrRecord { .. } => "ptr_record",
+                GraphNode::Screenshot { .. } => "screenshot",
             };
             xml.push_str(&format!(
                 "    <node id=\"n{}\"><data key=\"d0\">{}</data></node>\n",
@@ -130,6 +158,8 @@ impl ReconGraph {
                 GraphEdge::Uses => "uses",
                 GraphEdge::Related => "related",
                 GraphEdge::Exposes => "exposes",
+                GraphEdge::ResolvesTo => "resolves_to",
+                GraphEdge::HasScreenshot => "has_screenshot",
             };
             xml.push_str(&format!(
                 "    <edge id=\"e{}\" source=\"n{}\" target=\"n{}\"><data key=\"d1\">{}</data></edge>\n",

@@ -1,58 +1,71 @@
-use serde::{Deserialize, Serialize};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::http::Request;
+use futures::{SinkExt, StreamExt};
+use std::time::Duration;
+use tokio::time::timeout;
+use tracing::debug;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WebSocketInfo {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WsResult {
     pub scheme: String,
     pub path: String,
-    pub server_header: Option<String>,
 }
 
-pub async fn probe_websocket(host: &str, port: u16) -> Option<WebSocketInfo> {
-    let schemes = if port == 80 || port == 8080 || port == 3000 {
-        vec!["ws"]
+const PATHS: [&str; 4] = ["/", "/ws", "/socket", "/websocket"];
+
+pub async fn probe_websocket(host: &str, port: u16) -> Option<WsResult> {
+    let host_part = if host.contains(':') && !host.contains('[') {
+        format!("[{}]", host)
     } else {
-        vec!["wss"]
+        host.to_string()
     };
 
-    let paths = vec!["/", "/ws", "/socket", "/socket.io", "/graphql", "/api/ws"];
+    let schemes = if port == 443 || port == 8443 || port == 8883 {
+        ["wss", "ws"]
+    } else {
+        ["ws", "wss"]
+    };
 
-    for scheme in &schemes {
-        for path in &paths {
-            let url = format!("{}://{}:{}{}", scheme, host, port, path);
-            let request = match Request::builder()
-                .uri(&url)
-                .header("Host", host)
-                .header("Connection", "Upgrade")
-                .header("Upgrade", "websocket")
-                .header("Sec-WebSocket-Version", "13")
-                .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-                .body(())
-            {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            match tokio::time::timeout(std::time::Duration::from_secs(3), connect_async(request))
-                .await
-            {
-                Ok(Ok((_, response))) => {
-                    let server_header = response
-                        .headers()
-                        .get("server")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-                    return Some(WebSocketInfo {
+    for scheme in schemes {
+        for path in PATHS {
+            let url = format!("{}://{}:{}{}", scheme, host_part, port, path);
+            match timeout(Duration::from_secs(4), handshake(&url)).await {
+                Ok(true) => {
+                    return Some(WsResult {
                         scheme: scheme.to_string(),
                         path: path.to_string(),
-                        server_header,
                     });
                 }
-                _ => continue,
+                Ok(false) => debug!("WebSocket handshake rejected: {}", url),
+                Err(_) => debug!("WebSocket probe timeout: {}", url),
             }
         }
     }
 
     None
+}
+
+async fn handshake(url: &str) -> bool {
+    let (mut ws, response) = match tokio_tungstenite::connect_async(url).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            debug!("WebSocket connect error on {}: {}", url, e);
+            return false;
+        }
+    };
+
+    if response.status().as_u16() != 101 {
+        let _ = ws.close(None).await;
+        return false;
+    }
+
+    let _ = timeout(Duration::from_millis(300), async {
+        while let Some(msg) = ws.next().await {
+            if msg.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+
+    let _ = ws.close(None).await;
+    true
 }

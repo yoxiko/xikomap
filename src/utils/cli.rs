@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Advanced network reconnaissance tool", long_about = None)]
 pub struct Cli {
-    #[arg(short, long)]
+    #[arg(value_name = "TARGET")]
     pub target: String,
 
     #[arg(short, long, value_delimiter = ',')]
@@ -18,12 +18,12 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
-    #[arg(long)]
+    #[arg(long = "json")]
     pub export_json: bool,
 
-    #[arg(long)]
+    #[arg(long = "pdf")]
     pub export_pdf: bool,
 
-    #[arg(long)]
+    #[arg(long, short = 's')]
     pub screenshot: bool,
 }

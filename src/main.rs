@@ -40,13 +40,26 @@ fn format_url(target: &str, port: u16, scheme: &str) -> String {
         format!("{}://{}:{}", scheme, target, port)
     }
 }
+fn normalize_args() -> Vec<String> {
+    std::env::args()
+        .map(|a| match a.as_str() {
+            "-pdf" => "--pdf".to_string(),
+            "-json" => "--json".to_string(),
+            "-all" => "--all".to_string(),
+            "-stealth" => "--stealth".to_string(),
+            "-verbose" => "--verbose".to_string(),
+            "-screenshot" => "--screenshot".to_string(),
+            _ => a,
+        })
+        .collect()
+}
 
 #[tokio::main]
 async fn main() {
     print_logo();
     init_logger();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_args());
 
     let target = cli.target.clone();
     let ports: Vec<u16> = if cli.all {

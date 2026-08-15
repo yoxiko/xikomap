@@ -1,20 +1,24 @@
 @echo off
 echo Checking prerequisites...
-where cargo >nul 2>nul
+
+:: Standard Rust installation path
+set "CARGO_BIN=%USERPROFILE%\.cargo\bin"
+
+:: If cargo is in the default directory, add it to current session PATH automatically
+if exist "%CARGO_BIN%\cargo.exe" (
+    set "PATH=%PATH%;%CARGO_BIN%"
+)
+
+:: Now check if cargo is available in the current session
+cargo --version >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    echo [!] Cargo is not installed. Please install Rust from https://rustup.rs/
+    echo [!] Cargo is not installed or not found in PATH.
+    echo Please install Rust from https://rustup.rs/ and RESTART your terminal.
     pause
     exit /b 1
 )
 
-echo Checking Npcap...
-reg query "HKLM\SYSTEM\CurrentControlSet\Services\Npcap" >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo [!] Npcap is not installed or not detected.
-    echo SYN Stealth scan requires Npcap. Please download and install it from https://npcap.com/
-    echo Make sure to check "Install Npcap in WinPcap API-compatible Mode" during installation.
-    pause
-)
+echo [+] Cargo found!
 
 echo Building xikomap in release mode...
 cargo build --release

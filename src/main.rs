@@ -6,6 +6,7 @@ mod prober;
 mod reporter;
 mod scanner;
 mod utils;
+
 use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
 use crate::detectors::api::{ApiDiscovery, ApiResult};
 use crate::detectors::cloud::{CloudDetector, CloudResult};
@@ -25,8 +26,9 @@ use crate::prober::websocket as websocket_prober;
 use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
 use crate::scanner::{ScannerEngine, SynScanner};
 use crate::utils::cli::Cli;
-use crate::utils::logger::init_logger;
+use crate::utils::logger::{get_log_collector, init_logger};
 use crate::utils::logo::print_logo;
+use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use std::process;
@@ -40,6 +42,7 @@ fn format_url(target: &str, port: u16, scheme: &str) -> String {
         format!("{}://{}:{}", scheme, target, port)
     }
 }
+
 fn normalize_args() -> Vec<String> {
     std::env::args()
         .map(|a| match a.as_str() {
@@ -58,6 +61,8 @@ fn normalize_args() -> Vec<String> {
 async fn main() {
     print_logo();
     init_logger();
+
+    let start_time = Utc::now();
 
     let cli = Cli::parse_from(normalize_args());
 
@@ -493,8 +498,21 @@ async fn main() {
         }
     }
 
+    let end_time = Utc::now();
+    let duration = end_time.signed_duration_since(start_time);
+    info!(
+        "Scan completed in {}m {}s. Graph nodes: {}, edges: {}",
+        duration.num_minutes(),
+        duration.num_seconds() % 60,
+        graph.node_count(),
+        graph.edge_count()
+    );
+
     if cli.export_pdf {
         let pdf_output = format!("{}_report.pdf", safe_target_name);
+        let logs = get_log_collector()
+            .map(|c| c.entries())
+            .unwrap_or_default();
         match pdf_reporter::PdfReporter::generate(
             &graph,
             &target,
@@ -509,15 +527,12 @@ async fn main() {
             &all_security_results,
             &all_ptr_results,
             &all_screenshot_results,
+            start_time,
+            end_time,
+            &logs,
         ) {
             Ok(_) => info!("PDF report saved to: {}", pdf_output),
             Err(e) => error!("Failed to generate PDF: {}", e),
         }
     }
-
-    info!(
-        "Scan completed. Graph nodes: {}, edges: {}",
-        graph.node_count(),
-        graph.edge_count()
-    );
 }

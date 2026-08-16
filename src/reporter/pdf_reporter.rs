@@ -335,9 +335,7 @@ impl PdfReporter {
         );
 
         section!("01", "Open Ports");
-        if open_ports.is_empty() {
-            body!("No open ports found on the target.");
-        } else {
+        if !open_ports.is_empty() {
             current_layer.set_fill_color(col(GRAY.0, GRAY.1, GRAY.2));
             current_layer.use_text("PORT", 8.5_f32, Mm(M), Mm(y), &font_bold);
             current_layer.use_text("SERVICE", 8.5_f32, Mm(M + 25.0_f32), Mm(y), &font_bold);
@@ -360,10 +358,8 @@ impl PdfReporter {
             rule!(0.3_f32, LIGHT);
         }
 
-        section!("02", "Reverse DNS (PTR)");
-        if ptr_results.is_empty() {
-            body!("No PTR records resolved for the target.");
-        } else {
+        if !ptr_results.is_empty() {
+            section!("02", "Reverse DNS (PTR)");
             for ptr in ptr_results {
                 kv!(&ptr.ip, &ptr.hostname);
             }
@@ -379,10 +375,8 @@ impl PdfReporter {
         );
         kv!("Graph Size", &format!("{} nodes, {} edges", graph.node_count(), graph.edge_count()));
 
-        section!("04", "SSH Fingerprinting");
-        if ssh_results.is_empty() {
-            body!("No SSH services detected.");
-        } else {
+        if !ssh_results.is_empty() {
+            section!("04", "SSH Fingerprinting");
             for ssh in ssh_results {
                 kv!(&format!("Port {}", ssh.port), &format!("{} {}", ssh.software, ssh.version));
                 kv!("Banner", &ssh.banner);
@@ -396,19 +390,15 @@ impl PdfReporter {
             }
         }
 
-        section!("05", "JARM Fingerprints");
-        if jarm_results.is_empty() {
-            body!("No JARM fingerprints captured.");
-        } else {
+        if !jarm_results.is_empty() {
+            section!("05", "JARM Fingerprints");
             for jarm in jarm_results {
                 kv!(&format!("Port {}", jarm.port), &jarm.hash);
             }
         }
 
-        section!("06", "Favicon Fingerprints");
-        if favicon_results.is_empty() {
-            body!("No favicons retrieved.");
-        } else {
+        if !favicon_results.is_empty() {
+            section!("06", "Favicon Fingerprints");
             for fav in favicon_results {
                 let tech = fav.technology.clone().unwrap_or_else(|| "no local match".to_string());
                 kv!(&format!("Port {}", fav.port), &format!("hash {} ({})", fav.hash, tech));
@@ -416,10 +406,8 @@ impl PdfReporter {
             }
         }
 
-        section!("07", "Security Headers Analysis");
-        if security_results.is_empty() {
-            body!("No HTTP services available for header auditing.");
-        } else {
+        if !security_results.is_empty() {
+            section!("07", "Security Headers Analysis");
             for sec in security_results {
                 kv!("URL", &sec.url);
                 kv!("Grade", &format!("{} ({}/{})", sec.grade, sec.total_score, sec.max_total_score));
@@ -435,10 +423,8 @@ impl PdfReporter {
             }
         }
 
-        section!("08", "CORS Misconfigurations");
-        if cors_results.is_empty() {
-            body!("No CORS misconfigurations detected.");
-        } else {
+        if !cors_results.is_empty() {
+            section!("08", "CORS Misconfigurations");
             for cors in cors_results {
                 kv!("URL", &cors.url);
                 kv!("Severity", &cors.severity);
@@ -449,22 +435,18 @@ impl PdfReporter {
             }
         }
 
-        section!("09", "Technologies & Fingerprinting");
-        if technologies.is_empty() {
-            body!("No technologies identified.");
-        } else {
+        if !technologies.is_empty() {
+            section!("09", "Technologies & Fingerprinting");
             for (tech, version) in technologies {
                 kv!(tech, version);
             }
         }
 
-        section!("10", "API Discovery");
-        if api_results.endpoints.is_empty()
-            && api_results.openapi.is_none()
-            && api_results.graphql.is_none()
+        if !api_results.endpoints.is_empty()
+            || api_results.openapi.is_some()
+            || api_results.graphql.is_some()
         {
-            body!("No API endpoints discovered.");
-        } else {
+            section!("10", "API Discovery");
             if let Some(openapi) = &api_results.openapi {
                 kv!("OpenAPI", &format!("{} (v{})", openapi.title, openapi.version));
             }
@@ -476,10 +458,8 @@ impl PdfReporter {
             }
         }
 
-        section!("11", "Cloud Infrastructure");
-        if cloud_results.services.is_empty() {
-            body!("No cloud provider indicators detected.");
-        } else {
+        if !cloud_results.services.is_empty() || cloud_results.ip.is_some() {
+            section!("11", "Cloud Infrastructure");
             for service in &cloud_results.services {
                 body!(&format!("- {}", service));
             }
@@ -488,10 +468,8 @@ impl PdfReporter {
             }
         }
 
-        section!("12", "Screenshots");
-        if screenshot_results.is_empty() {
-            body!("No screenshots captured.");
-        } else {
+        if !screenshot_results.is_empty() {
+            section!("12", "Screenshots");
             for ss in screenshot_results {
                 kv!("URL", &ss.url);
                 kv!("Title", &ss.title);
@@ -500,7 +478,6 @@ impl PdfReporter {
             }
         }
 
-        section!("13", "Recommendations");
         let mut recs: Vec<String> = Vec::new();
         for p in open_ports {
             match p {
@@ -533,44 +510,47 @@ impl PdfReporter {
                 ));
             }
         }
-        if recs.is_empty() {
-            recs.push("No specific recommendations; continue periodic monitoring.".to_string());
-        }
-        for (i, rec) in recs.iter().enumerate() {
-            for (j, ln) in wrap(rec, 112).iter().enumerate() {
-                check_page!(20.0_f32);
-                if j == 0 {
-                    current_layer.set_fill_color(col(ORANGE.0, ORANGE.1, ORANGE.2));
-                    current_layer.use_text(&format!("{}.", i + 1), 9.0_f32, Mm(M), Mm(y), &font_bold);
-                    current_layer.set_fill_color(col(DARK.0, DARK.1, DARK.2));
-                    current_layer.use_text(ln, 9.0_f32, Mm(M + 6.0_f32), Mm(y), &font);
-                } else {
-                    current_layer.set_fill_color(col(DARK.0, DARK.1, DARK.2));
-                    current_layer.use_text(ln, 9.0_f32, Mm(M + 6.0_f32), Mm(y), &font);
+        if !recs.is_empty() {
+            section!("13", "Recommendations");
+            for (i, rec) in recs.iter().enumerate() {
+                for (j, ln) in wrap(rec, 112).iter().enumerate() {
+                    check_page!(20.0_f32);
+                    if j == 0 {
+                        current_layer.set_fill_color(col(ORANGE.0, ORANGE.1, ORANGE.2));
+                        current_layer.use_text(&format!("{}.", i + 1), 9.0_f32, Mm(M), Mm(y), &font_bold);
+                        current_layer.set_fill_color(col(DARK.0, DARK.1, DARK.2));
+                        current_layer.use_text(ln, 9.0_f32, Mm(M + 6.0_f32), Mm(y), &font);
+                    } else {
+                        current_layer.set_fill_color(col(DARK.0, DARK.1, DARK.2));
+                        current_layer.use_text(ln, 9.0_f32, Mm(M + 6.0_f32), Mm(y), &font);
+                    }
+                    y -= 4.5_f32;
                 }
-                y -= 4.5_f32;
             }
         }
 
-        section!("14", "Full Scan Log");
-        kv!("Total entries", &logs.len().to_string());
-        y -= 2.0_f32;
-        for entry in logs {
-            let timestamp = entry.timestamp.format("%H:%M:%S%.3f").to_string();
-            let raw = format!("[{}] [{}] {}", timestamp, entry.level, entry.message);
-            for ln in wrap(&raw, 118) {
-                check_page!(20.0_f32);
-                let c = match entry.level.as_str() {
-                    "ERROR" => RED,
-                    "WARN" => ORANGE,
-                    _ => DARK,
-                };
-                current_layer.set_fill_color(col(c.0, c.1, c.2));
-                current_layer.use_text(&ln, 7.0_f32, Mm(M), Mm(y), &font_mono);
-                y -= 3.4_f32;
+        if !logs.is_empty() {
+            section!("14", "Full Scan Log");
+            kv!("Total entries", &logs.len().to_string());
+            y -= 2.0_f32;
+            for entry in logs {
+                let timestamp = entry.timestamp.format("%H:%M:%S%.3f").to_string();
+                let raw = format!("[{}] [{}] {}", timestamp, entry.level, entry.message);
+                for ln in wrap(&raw, 118) {
+                    check_page!(20.0_f32);
+                    let c = match entry.level.as_str() {
+                        "ERROR" => RED,
+                        "WARN" => ORANGE,
+                        _ => DARK,
+                    };
+                    current_layer.set_fill_color(col(c.0, c.1, c.2));
+                    current_layer.use_text(&ln, 7.0_f32, Mm(M), Mm(y), &font_mono);
+                    y -= 3.4_f32;
+                }
             }
         }
 
+        // ВОТ ЭТОТ БЛОК:
         let file = File::create(output_path)?;
         let mut writer = BufWriter::new(file);
         doc.save(&mut writer)?;

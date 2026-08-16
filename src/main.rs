@@ -654,49 +654,73 @@ async fn main() {
     }
 
     if cli.screenshot {
-        let web_targets: Vec<(String, u16)> = open_ports
-            .iter()
-            .filter(|p| HTTP_PORTS.contains(p))
-            .map(|p| {
-                let scheme = if TLS_PORTS.contains(p) { "https" } else { "http" };
-                (format_url(&target, *p, scheme), *p)
-            })
-            .collect();
+        let web_targets: Vec<(String, u16)> = if !open_ports.is_empty() {
+            info!("Preparing screenshots for {} open ports...", open_ports.len());
+            open_ports
+                .iter()
+                .map(|p| {
+                    let scheme = if TLS_PORTS.contains(p) || *p == 443 || *p == 8443 {
+                        "https"
+                    } else {
+                        "http"
+                    };
+                    (format_url(&target, *p, scheme), *p)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         if !web_targets.is_empty() {
-            info!("Launching headless browser for screenshots...");
-            if let Some(mut browser) = ScreenshotCapture::launch().await {
-                for (url, port) in &web_targets {
-                    if let Some(ss) = ScreenshotCapture::capture_with_browser(
-                        &mut browser,
-                        url,
-                        "./screenshots",
-                        &target.replace(['.', ':', '/'], "_"),
-                        *port,
-                    )
-                    .await
-                    {
-                        info!(
-                            "{} Screenshot saved: {} (title: {})",
-                            "[+]".green().bold(),
-                            ss.file_path,
-                            ss.title
-                        );
-                        if let Some(pn) = port_nodes.get(port) {
-                            let ss_node = graph.add_node(GraphNode::Screenshot {
-                                url: ss.url.clone(),
-                                file_path: ss.file_path.clone(),
-                                title: ss.title.clone(),
-                            });
-                            graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
+            info!("Launching headless browser for {} screenshots...", web_targets.len());
+            match ScreenshotCapture::launch().await {
+                Some(mut browser) => {
+                    for (url, port) in &web_targets {
+                        info!("Capturing screenshot for {} (port {})...", url, port);
+                        match ScreenshotCapture::capture_with_browser(
+                            &mut browser,
+                            url,
+                            "./screenshots",
+                            &target.replace(['.', ':', '/'], "_"),
+                            *port,
+                        )
+                        .await
+                        {
+                            Some(ss) => {
+                                info!(
+                                    "{} Screenshot saved: {} (title: {})",
+                                    "[+]".green().bold(),
+                                    ss.file_path,
+                                    ss.title
+                                );
+                                if let Some(pn) = port_nodes.get(port) {
+                                    let ss_node = graph.add_node(GraphNode::Screenshot {
+                                        url: ss.url.clone(),
+                                        file_path: ss.file_path.clone(),
+                                        title: ss.title.clone(),
+                                    });
+                                    graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
+                                }
+                                all_screenshot_results.push(ss);
+                            }
+                            None => {
+                                warn!("Failed to capture screenshot for {} (port {})", url, port);
+                            }
                         }
-                        all_screenshot_results.push(ss);
                     }
+                    let _ = browser.close().await;
+                    info!(
+                        "Screenshots completed: {} successful",
+                        all_screenshot_results.len()
+                    );
                 }
-                let _ = browser.close().await;
-            } else {
-                warn!("Failed to launch browser, screenshots disabled");
+                None => {
+                    warn!("Failed to launch browser - Chrome/Chromium not installed or not in PATH");
+                    warn!("Install Chrome or Chromium to enable screenshot functionality");
+                }
             }
+        } else {
+            info!("No open ports found - skipping screenshots");
         }
     }
 

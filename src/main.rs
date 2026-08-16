@@ -731,12 +731,15 @@ async fn main() {
         let logs = get_log_collector()
             .map(|c| c.entries())
             .unwrap_or_default();
+        let concurrency = if cli.all { 1000 } else { 100 };
         match pdf_reporter::PdfReporter::generate(
             &graph,
             &target,
             &pdf_output,
             scan_type_str,
             &open_ports,
+            ports.len(),
+            concurrency,
             &all_technologies,
             &all_api_results,
             &all_cloud_results,

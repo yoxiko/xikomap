@@ -506,6 +506,7 @@ async fn main() {
         endpoints: Vec::new(),
     };
     let mut all_ssh_results: Vec<SshFingerprint> = Vec::new();
+    let mut all_screenshot_results: Vec<ScreenshotResult> = Vec::new();
     let mut all_jarm_results: Vec<JarmResult> = Vec::new();
     let mut all_security_results: Vec<SecurityHeadersResult> = Vec::new();
     let mut all_favicon_results: Vec<FaviconResult> = Vec::new();
@@ -689,6 +690,7 @@ async fn main() {
                             });
                             graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
                         }
+                        all_screenshot_results.push(ss);
                     }
                 }
                 let _ = browser.close().await;

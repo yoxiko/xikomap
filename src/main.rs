@@ -12,15 +12,17 @@ use crate::detectors::api::{ApiDiscovery, ApiResult};
 use crate::detectors::cloud::{CloudDetector, CloudResult};
 use crate::detectors::fingerprinting::FingerprintingDetector;
 use crate::detectors::iot::IoTDetector;
+use crate::prober::cors::{CorsResult, CorsScanner};
 use crate::prober::dns_enumerator::DnsEnumerator;
+use crate::prober::favicon::{FaviconProber, FaviconResult};
 use crate::prober::grpc as grpc_prober;
 use crate::prober::http2_fingerprint::HTTP2Fingerprint;
-use crate::prober::jarm::JarmScanner;
+use crate::prober::jarm::{JarmResult, JarmScanner};
 use crate::prober::quic as quic_prober;
-use crate::prober::rdns::RdnsProber;
-use crate::prober::screenshot::ScreenshotCapture;
-use crate::prober::security_headers::SecurityHeadersAnalyzer;
-use crate::prober::ssh_fingerprint::SshProber;
+use crate::prober::rdns::{PtrRecord, RdnsProber};
+use crate::prober::screenshot::{ScreenshotCapture, ScreenshotResult};
+use crate::prober::security_headers::{SecurityHeadersAnalyzer, SecurityHeadersResult};
+use crate::prober::ssh_fingerprint::{SshFingerprint, SshProber};
 use crate::prober::tls_fingerprint::TLSFingerprint;
 use crate::prober::websocket as websocket_prober;
 use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
@@ -31,9 +33,18 @@ use crate::utils::logo::print_logo;
 use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
+use futures::StreamExt;
+use petgraph::graph::NodeIndex;
+use std::collections::HashMap;
 use std::process;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+const WEB_PORTS: [u16; 9] = [80, 443, 8080, 8443, 3000, 8000, 9090, 50051, 10000];
+const HTTP_PORTS: [u16; 4] = [80, 443, 8080, 8443];
+const TLS_PORTS: [u16; 2] = [443, 8443];
+const SSH_PORTS: [u16; 4] = [22, 2222, 2200, 8022];
+const JARM_PORTS: [u16; 3] = [443, 8443, 4443];
 
 fn format_url(target: &str, port: u16, scheme: &str) -> String {
     if target.contains(':') && !target.contains('[') {
@@ -55,6 +66,276 @@ fn normalize_args() -> Vec<String> {
             _ => a,
         })
         .collect()
+}
+
+enum RawFinding {
+    Service { name: String, detail: String },
+    Technology { name: String, version: String },
+    Ssh(SshFingerprint),
+    Jarm(JarmResult),
+    Security(SecurityHeadersResult),
+    Favicon(FaviconResult),
+    Cors(CorsResult),
+    ApiOpenApi { title: String, version: String },
+    ApiGraphql { url: String },
+    ApiEndpoint(String),
+}
+
+struct PortReport {
+    port: u16,
+    findings: Vec<RawFinding>,
+}
+
+async fn probe_port(
+    target: String,
+    port: u16,
+    all: bool,
+    http_client: reqwest::Client,
+) -> PortReport {
+    let mut findings: Vec<RawFinding> = Vec::new();
+
+    let is_web = all || WEB_PORTS.contains(&port);
+    let is_tls = TLS_PORTS.contains(&port);
+    let is_http = HTTP_PORTS.contains(&port);
+    let scheme = if is_tls { "https" } else { "http" };
+    let url = format_url(&target, port, scheme);
+
+    let ssh_fut = async {
+        if SSH_PORTS.contains(&port) {
+            SshProber::probe(&target, port).await
+        } else {
+            None
+        }
+    };
+
+    let jarm_fut = async {
+        if JARM_PORTS.contains(&port) {
+            JarmScanner::scan(&target, port).await
+        } else {
+            None
+        }
+    };
+
+    let tls_fut = async {
+        if is_tls {
+            TLSFingerprint::analyze(&target, port).ok()
+        } else {
+            None
+        }
+    };
+
+    let ws_fut = async {
+        if is_web {
+            websocket_prober::probe_websocket(&target, port).await
+        } else {
+            None
+        }
+    };
+
+    let grpc_fut = async {
+        if is_web {
+            grpc_prober::probe_grpc(&target, port, &http_client).await
+        } else {
+            None
+        }
+    };
+
+    let quic_fut = async {
+        if all || [80, 443, 8443].contains(&port) {
+            if let Some(ep) = quic_prober::create_quic_endpoint() {
+                return quic_prober::probe_quic(&target, port, &ep).await;
+            }
+        }
+        None
+    };
+
+    let http2_fut = async {
+        if is_http {
+            HTTP2Fingerprint::analyze(&target, port).await.ok()
+        } else {
+            None
+        }
+    };
+
+    let sec_fut = async {
+        if is_http {
+            SecurityHeadersAnalyzer::new(http_client.clone())
+                .analyze(&url)
+                .await
+        } else {
+            None
+        }
+    };
+
+    let fav_fut = async {
+        if is_http {
+            FaviconProber::probe(&http_client, &target, port, scheme).await
+        } else {
+            None
+        }
+    };
+
+    let cors_fut = async {
+        if is_http {
+            CorsScanner::new(http_client.clone()).analyze(&url).await
+        } else {
+            None
+        }
+    };
+
+    let fp_fut = async {
+        if is_http {
+            FingerprintingDetector::new(http_client.clone())
+                .detect(&url)
+                .await
+                .ok()
+        } else {
+            None
+        }
+    };
+
+    let api_fut = async {
+        if is_http {
+            ApiDiscovery::new(http_client.clone()).discover(&url).await
+        } else {
+            ApiResult {
+                openapi: None,
+                graphql: None,
+                endpoints: Vec::new(),
+            }
+        }
+    };
+
+    let mqtt_fut = async {
+        if [1883, 8883].contains(&port) {
+            Some(IoTDetector::detect_mqtt(&target, port, Duration::from_secs(3)).await)
+        } else {
+            None
+        }
+    };
+
+    let coap_fut = async {
+        if [5683, 5684].contains(&port) {
+            Some(IoTDetector::detect_coap(&target, port, Duration::from_secs(3)).await)
+        } else {
+            None
+        }
+    };
+
+    let (ssh, jarm, tls, ws, grpc, quic, http2, sec, fav, cors, fp, api, mqtt, coap) = tokio::join!(
+        ssh_fut, jarm_fut, tls_fut, ws_fut, grpc_fut, quic_fut, http2_fut, sec_fut, fav_fut,
+        cors_fut, fp_fut, api_fut, mqtt_fut, coap_fut
+    );
+
+    if let Some(ssh_fp) = ssh {
+        findings.push(RawFinding::Ssh(ssh_fp));
+    }
+
+    if let Some(jarm_res) = jarm {
+        findings.push(RawFinding::Jarm(jarm_res));
+    }
+
+    if let Some(tls_fp) = tls {
+        if let Some(ja3) = tls_fp.ja3 {
+            findings.push(RawFinding::Technology {
+                name: "TLS".to_string(),
+                version: ja3,
+            });
+        }
+    }
+
+    if let Some(ws_res) = ws {
+        findings.push(RawFinding::Service {
+            name: "websocket".to_string(),
+            detail: format!("{}://{}:{}{}", ws_res.scheme, target, port, ws_res.path),
+        });
+    }
+
+    if let Some(grpc_res) = grpc {
+        findings.push(RawFinding::Service {
+            name: "grpc".to_string(),
+            detail: format!("status={}", grpc_res.status),
+        });
+    }
+
+    if let Some(quic_res) = quic {
+        findings.push(RawFinding::Technology {
+            name: quic_res.protocol,
+            version: quic_res.alpn.join(","),
+        });
+    }
+
+    if let Some(http2_fp) = http2 {
+        if !http2_fp.alpn.is_empty() {
+            findings.push(RawFinding::Technology {
+                name: "HTTP/2".to_string(),
+                version: http2_fp.alpn.join(","),
+            });
+        }
+    }
+
+    if let Some(sec_res) = sec {
+        findings.push(RawFinding::Security(sec_res));
+    }
+
+    if let Some(fav_res) = fav {
+        findings.push(RawFinding::Favicon(fav_res));
+    }
+
+    if let Some(cors_res) = cors {
+        findings.push(RawFinding::Cors(cors_res));
+    }
+
+    if let Some(fp_res) = fp {
+        if !fp_res.detected.is_empty() {
+            for tech in &fp_res.detected {
+                let version = fp_res
+                    .versions
+                    .get(tech)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                findings.push(RawFinding::Technology {
+                    name: tech.clone(),
+                    version,
+                });
+            }
+        }
+    }
+
+    if let Some(openapi) = &api.openapi {
+        findings.push(RawFinding::ApiOpenApi {
+            title: openapi.title.clone(),
+            version: openapi.version.clone(),
+        });
+    }
+    if let Some(graphql) = &api.graphql {
+        findings.push(RawFinding::ApiGraphql {
+            url: graphql.url.clone(),
+        });
+    }
+    for endpoint in &api.endpoints {
+        findings.push(RawFinding::ApiEndpoint(endpoint.clone()));
+    }
+
+    if let Some(mqtt_res) = mqtt {
+        if mqtt_res.detected {
+            findings.push(RawFinding::Service {
+                name: "mqtt".to_string(),
+                detail: format!("{:?} {:?}", mqtt_res.version, mqtt_res.features),
+            });
+        }
+    }
+
+    if let Some(coap_res) = coap {
+        if coap_res.detected {
+            findings.push(RawFinding::Service {
+                name: "coap".to_string(),
+                detail: format!("{:?}", coap_res.resources),
+            });
+        }
+    }
+
+    PortReport { port, findings }
 }
 
 #[tokio::main]
@@ -141,9 +422,9 @@ async fn main() {
     let target_node = graph.add_node(GraphNode::Domain(target.clone()));
 
     let http_client = match reqwest::Client::builder()
-        .http2_prior_knowledge()
         .timeout(Duration::from_secs(4))
         .danger_accept_invalid_certs(true)
+        .pool_max_idle_per_host(16)
         .build()
     {
         Ok(c) => c,
@@ -152,15 +433,6 @@ async fn main() {
             process::exit(1);
         }
     };
-
-    let quic_endpoint = quic_prober::create_quic_endpoint();
-    if quic_endpoint.is_none() {
-        warn!("QUIC endpoint unavailable, QUIC probing disabled");
-    }
-
-    let fp_detector = FingerprintingDetector::new(http_client.clone());
-    let api_detector = ApiDiscovery::new(http_client.clone());
-    let security_analyzer = SecurityHeadersAnalyzer::new(http_client.clone());
 
     let mut all_cloud_results = CloudResult {
         services: Vec::new(),
@@ -197,21 +469,9 @@ async fn main() {
         }
     }
 
-    let mut all_technologies: Vec<(String, String)> = Vec::new();
-    let mut all_api_results = ApiResult {
-        openapi: None,
-        graphql: None,
-        endpoints: Vec::new(),
-    };
-    let mut all_ssh_results = Vec::new();
-    let mut all_jarm_results = Vec::new();
-    let mut all_security_results = Vec::new();
-    let mut all_ptr_results = Vec::new();
-    let mut all_screenshot_results = Vec::new();
-
+    let mut all_ptr_results: Vec<PtrRecord> = Vec::new();
     if let Some(ip) = target_ip {
-        let rdns_prober = RdnsProber::new();
-        if let Some(prober) = rdns_prober {
+        if let Some(prober) = RdnsProber::new() {
             if let Some(ptr) = prober.lookup(&ip.to_string()).await {
                 info!(
                     "{} PTR record: {} -> {}",
@@ -229,12 +489,37 @@ async fn main() {
         }
     }
 
-    for port in &open_ports {
+    info!("Probing {} open ports in parallel...", open_ports.len());
+
+    let mut reports: Vec<PortReport> = futures::stream::iter(open_ports.clone())
+        .map(|port| probe_port(target.clone(), port, cli.all, http_client.clone()))
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    reports.sort_by_key(|r| r.port);
+
+    let mut all_technologies: Vec<(String, String)> = Vec::new();
+    let mut all_api_results = ApiResult {
+        openapi: None,
+        graphql: None,
+        endpoints: Vec::new(),
+    };
+    let mut all_ssh_results: Vec<SshFingerprint> = Vec::new();
+    let mut all_jarm_results: Vec<JarmResult> = Vec::new();
+    let mut all_security_results: Vec<SecurityHeadersResult> = Vec::new();
+    let mut all_favicon_results: Vec<FaviconResult> = Vec::new();
+    let mut all_cors_results: Vec<CorsResult> = Vec::new();
+    let mut port_nodes: HashMap<u16, NodeIndex> = HashMap::new();
+
+    for report in reports {
+        let port = report.port;
         let port_node = graph.add_node(GraphNode::Port {
             ip: target.clone(),
-            port: *port,
+            port,
         });
         graph.add_edge(target_node, port_node, GraphEdge::Hosts);
+        port_nodes.insert(port, port_node);
 
         if cli.verbose {
             debug!("{} Open TCP port: {}", "[+]".green().bold(), port);
@@ -242,242 +527,173 @@ async fn main() {
             info!("{} Open TCP port: {}", "[+]".green().bold(), port);
         }
 
-        if [22, 2222, 2200, 8022].contains(port) {
-            if let Some(ssh_fp) = SshProber::probe(&target, *port).await {
-                info!(
-                    "{} SSH: {} {} (banner: {})",
-                    "[+]".green().bold(),
-                    ssh_fp.software,
-                    ssh_fp.version,
-                    ssh_fp.banner
-                );
-                let ssh_node = graph.add_node(GraphNode::SshService {
-                    port: *port,
-                    banner: ssh_fp.banner.clone(),
-                    software: ssh_fp.software.clone(),
-                    version: ssh_fp.version.clone(),
-                });
-                graph.add_edge(port_node, ssh_node, GraphEdge::Runs);
-                all_ssh_results.push(ssh_fp);
-            }
-        }
-
-        if [443, 8443, 4443].contains(port) {
-            if let Some(jarm) = JarmScanner::scan(&target, *port).await {
-                info!(
-                    "{} JARM: {} (port {})",
-                    "[+]".green().bold(),
-                    &jarm.hash[..16],
-                    port
-                );
-                let jarm_node = graph.add_node(GraphNode::JarmHash {
-                    port: *port,
-                    hash: jarm.hash.clone(),
-                });
-                graph.add_edge(port_node, jarm_node, GraphEdge::Uses);
-                all_jarm_results.push(jarm);
-            }
-        }
-
-        if cli.all || [80, 443, 8080, 8443, 3000, 8000, 9090, 50051, 10000].contains(port) {
-            if let Some(ws) = websocket_prober::probe_websocket(&target, *port).await {
-                info!(
-                    "{} WebSocket detected: {}://{}:{}{}",
-                    "[+]".green().bold(),
-                    ws.scheme,
-                    target,
-                    port,
-                    ws.path
-                );
-                let ws_node = graph.add_node(GraphNode::Service {
-                    port: *port,
-                    name: "websocket".to_string(),
-                });
-                graph.add_edge(port_node, ws_node, GraphEdge::Runs);
-            }
-
-            if let Some(grpc) = grpc_prober::probe_grpc(&target, *port, &http_client).await {
-                info!(
-                    "{} gRPC detected: status={}",
-                    "[+]".green().bold(),
-                    grpc.status
-                );
-                let grpc_node = graph.add_node(GraphNode::Service {
-                    port: *port,
-                    name: "grpc".to_string(),
-                });
-                graph.add_edge(port_node, grpc_node, GraphEdge::Runs);
-            }
-        }
-
-        if cli.all || [80, 443, 8443].contains(port) {
-            if let Some(ep) = &quic_endpoint {
-                if let Some(quic) = quic_prober::probe_quic(&target, *port, ep).await {
-                    info!(
-                        "{} QUIC/HTTP3 detected: {} (ALPN: {:?})",
-                        "[+]".green().bold(),
-                        quic.protocol,
-                        quic.alpn
-                    );
-                    let quic_node = graph.add_node(GraphNode::Technology {
-                        name: quic.protocol,
-                        version: quic.alpn.join(","),
+        for finding in report.findings {
+            match finding {
+                RawFinding::Service { name, detail } => {
+                    info!("{} {}: {}", "[+]".green().bold(), name, detail);
+                    let node = graph.add_node(GraphNode::Service {
+                        port,
+                        name: name.clone(),
                     });
-                    graph.add_edge(port_node, quic_node, GraphEdge::Uses);
+                    graph.add_edge(port_node, node, GraphEdge::Runs);
                 }
-            }
-        }
-
-        if [443, 8443].contains(port) {
-            match TLSFingerprint::analyze(&target, *port) {
-                Ok(fp) => {
-                    if let Some(ja3) = &fp.ja3 {
-                        info!("{} TLS JA3: {}", "[+]".green().bold(), ja3);
-                        let tls_node = graph.add_node(GraphNode::Technology {
-                            name: "TLS".to_string(),
-                            version: ja3.clone(),
-                        });
-                        graph.add_edge(port_node, tls_node, GraphEdge::Uses);
+                RawFinding::Technology { name, version } => {
+                    info!("{} {}: {}", "[+]".green().bold(), name, version);
+                    let node = graph.add_node(GraphNode::Technology {
+                        name: name.clone(),
+                        version: version.clone(),
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Uses);
+                    if name != "TLS" && name != "HTTP/2" {
+                        all_technologies.push((name, version));
                     }
                 }
-                Err(e) => debug!("TLS fingerprint failed: {}", e),
+                RawFinding::Ssh(ssh_fp) => {
+                    info!(
+                        "{} SSH: {} {} (banner: {})",
+                        "[+]".green().bold(),
+                        ssh_fp.software,
+                        ssh_fp.version,
+                        ssh_fp.banner
+                    );
+                    let node = graph.add_node(GraphNode::SshService {
+                        port,
+                        banner: ssh_fp.banner.clone(),
+                        software: ssh_fp.software.clone(),
+                        version: ssh_fp.version.clone(),
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Runs);
+                    all_ssh_results.push(ssh_fp);
+                }
+                RawFinding::Jarm(jarm_res) => {
+                    info!(
+                        "{} JARM: {} (port {})",
+                        "[+]".green().bold(),
+                        &jarm_res.hash[..16],
+                        port
+                    );
+                    let node = graph.add_node(GraphNode::JarmHash {
+                        port,
+                        hash: jarm_res.hash.clone(),
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Uses);
+                    all_jarm_results.push(jarm_res);
+                }
+                RawFinding::Security(sec_res) => {
+                    info!(
+                        "{} Security Headers: grade {} ({}/{})",
+                        "[+]".green().bold(),
+                        sec_res.grade,
+                        sec_res.total_score,
+                        sec_res.max_total_score
+                    );
+                    let node = graph.add_node(GraphNode::SecurityGrade {
+                        url: sec_res.url.clone(),
+                        grade: sec_res.grade.clone(),
+                        score: sec_res.total_score,
+                        max_score: sec_res.max_total_score,
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Uses);
+                    all_security_results.push(sec_res);
+                }
+                RawFinding::Favicon(fav_res) => {
+                    if let Some(tech) = &fav_res.technology {
+                        info!(
+                            "{} Favicon: {} (hash {})",
+                            "[+]".green().bold(),
+                            tech,
+                            fav_res.hash
+                        );
+                    } else {
+                        info!("{} Favicon hash: {}", "[+]".green().bold(), fav_res.hash);
+                    }
+                    let node = graph.add_node(GraphNode::Favicon {
+                        port,
+                        hash: fav_res.hash.clone(),
+                        technology: fav_res.technology.clone(),
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Uses);
+                    all_favicon_results.push(fav_res);
+                }
+                RawFinding::Cors(cors_res) => {
+                    warn!(
+                        "{} CORS misconfiguration on {} (severity: {})",
+                        "[!]".yellow().bold(),
+                        cors_res.url,
+                        cors_res.severity
+                    );
+                    let node = graph.add_node(GraphNode::CorsIssue {
+                        url: cors_res.url.clone(),
+                        severity: cors_res.severity.clone(),
+                        issues: cors_res.issues.clone(),
+                    });
+                    graph.add_edge(port_node, node, GraphEdge::Exposes);
+                    all_cors_results.push(cors_res);
+                }
+                RawFinding::ApiOpenApi { title, version } => {
+                    info!("{} OpenAPI: {} ({})", "[+]".green().bold(), title, version);
+                    all_api_results.openapi = Some(crate::detectors::api::OpenApiSpec {
+                        title,
+                        version,
+                        url: String::new(),
+                    });
+                }
+                RawFinding::ApiGraphql { url } => {
+                    info!("{} GraphQL: {}", "[+]".green().bold(), url);
+                    all_api_results.graphql = Some(crate::detectors::api::GraphQLInfo {
+                        url,
+                        introspection: false,
+                    });
+                }
+                RawFinding::ApiEndpoint(endpoint) => {
+                    all_api_results.endpoints.push(endpoint);
+                }
             }
         }
+    }
 
-        if [80, 443, 8080, 8443].contains(port) {
-            match HTTP2Fingerprint::analyze(&target, *port).await {
-                Ok(fp) => {
-                    if !fp.alpn.is_empty() {
+    if cli.screenshot {
+        let web_targets: Vec<(String, u16)> = open_ports
+            .iter()
+            .filter(|p| HTTP_PORTS.contains(p))
+            .map(|p| {
+                let scheme = if TLS_PORTS.contains(p) { "https" } else { "http" };
+                (format_url(&target, *p, scheme), *p)
+            })
+            .collect();
+
+        if !web_targets.is_empty() {
+            info!("Launching headless browser for screenshots...");
+            if let Some(mut browser) = ScreenshotCapture::launch().await {
+                for (url, port) in &web_targets {
+                    if let Some(ss) = ScreenshotCapture::capture_with_browser(
+                        &mut browser,
+                        url,
+                        "./screenshots",
+                        &target.replace(['.', ':', '/'], "_"),
+                        *port,
+                    )
+                    .await
+                    {
                         info!(
-                            "{} HTTP/2 ALPN: {:?}",
+                            "{} Screenshot saved: {} (title: {})",
                             "[+]".green().bold(),
-                            fp.alpn
+                            ss.file_path,
+                            ss.title
                         );
-                    }
-                }
-                Err(e) => debug!("HTTP/2 fingerprint failed: {}", e),
-            }
-
-            let scheme = if [443, 8443].contains(port) { "https" } else { "http" };
-            let url = format_url(&target, *port, scheme);
-
-            if let Some(sec_result) = security_analyzer.analyze(&url).await {
-                info!(
-                    "{} Security Headers: grade {} ({}/{})",
-                    "[+]".green().bold(),
-                    sec_result.grade,
-                    sec_result.total_score,
-                    sec_result.max_total_score
-                );
-                let sec_node = graph.add_node(GraphNode::SecurityGrade {
-                    url: url.clone(),
-                    grade: sec_result.grade.clone(),
-                    score: sec_result.total_score,
-                    max_score: sec_result.max_total_score,
-                });
-                graph.add_edge(port_node, sec_node, GraphEdge::Uses);
-                all_security_results.push(sec_result);
-            }
-
-            if cli.screenshot {
-                let safe_name = target.replace(['.', ':', '/'], "_");
-                if let Some(ss) = ScreenshotCapture::capture(&url, "./screenshots", &safe_name, *port).await {
-                    info!(
-                        "{} Screenshot saved: {} (title: {})",
-                        "[+]".green().bold(),
-                        ss.file_path,
-                        ss.title
-                    );
-                    let ss_node = graph.add_node(GraphNode::Screenshot {
-                        url: ss.url.clone(),
-                        file_path: ss.file_path.clone(),
-                        title: ss.title.clone(),
-                    });
-                    graph.add_edge(port_node, ss_node, GraphEdge::HasScreenshot);
-                    all_screenshot_results.push(ss);
-                }
-            }
-
-            match fp_detector.detect(&url).await {
-                Ok(results) => {
-                    if !results.detected.is_empty() {
-                        info!(
-                            "{} Fingerprinting: {:?}",
-                            "[+]".green().bold(),
-                            results.detected
-                        );
-                        for tech in &results.detected {
-                            let version = results
-                                .versions
-                                .get(tech)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            all_technologies.push((tech.clone(), version.clone()));
-
-                            let tech_node = graph.add_node(GraphNode::Technology {
-                                name: tech.clone(),
-                                version: version.clone(),
+                        if let Some(pn) = port_nodes.get(port) {
+                            let ss_node = graph.add_node(GraphNode::Screenshot {
+                                url: ss.url.clone(),
+                                file_path: ss.file_path.clone(),
+                                title: ss.title.clone(),
                             });
-                            graph.add_edge(port_node, tech_node, GraphEdge::Uses);
+                            graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
                         }
                     }
                 }
-                Err(e) => debug!("Fingerprinting failed: {}", e),
-            }
-
-            let api_results = api_detector.discover(&url).await;
-            if api_results.openapi.is_some() || api_results.graphql.is_some() {
-                info!("{} API endpoints discovered", "[+]".green().bold());
-                if let Some(openapi) = &api_results.openapi {
-                    info!(
-                        "{} OpenAPI: {} ({})",
-                        "[+]".green().bold(),
-                        openapi.title,
-                        openapi.version
-                    );
-                    all_api_results.openapi = Some(openapi.clone());
-                }
-                if let Some(graphql) = &api_results.graphql {
-                    info!("{} GraphQL: {}", "[+]".green().bold(), graphql.url);
-                    all_api_results.graphql = Some(graphql.clone());
-                }
-                all_api_results.endpoints.extend(api_results.endpoints.clone());
-            }
-        }
-
-        if [1883, 8883].contains(port) {
-            let mqtt_result =
-                IoTDetector::detect_mqtt(&target, *port, Duration::from_secs(3)).await;
-            if mqtt_result.detected {
-                info!(
-                    "{} MQTT detected: {:?} {:?}",
-                    "[+]".green().bold(),
-                    mqtt_result.version,
-                    mqtt_result.features
-                );
-                let mqtt_node = graph.add_node(GraphNode::Service {
-                    port: *port,
-                    name: "mqtt".to_string(),
-                });
-                graph.add_edge(port_node, mqtt_node, GraphEdge::Runs);
-            }
-        }
-
-        if [5683, 5684].contains(port) {
-            let coap_result =
-                IoTDetector::detect_coap(&target, *port, Duration::from_secs(3)).await;
-            if coap_result.detected {
-                info!(
-                    "{} CoAP detected: {:?}",
-                    "[+]".green().bold(),
-                    coap_result.resources
-                );
-                let coap_node = graph.add_node(GraphNode::Service {
-                    port: *port,
-                    name: "coap".to_string(),
-                });
-                graph.add_edge(port_node, coap_node, GraphEdge::Runs);
+                let _ = browser.close().await;
+            } else {
+                warn!("Failed to launch browser, screenshots disabled");
             }
         }
     }
@@ -526,6 +742,8 @@ async fn main() {
             &all_jarm_results,
             &all_security_results,
             &all_ptr_results,
+            &all_favicon_results,
+            &all_cors_results,
             &all_screenshot_results,
             start_time,
             end_time,
@@ -535,4 +753,3 @@ async fn main() {
             Err(e) => error!("Failed to generate PDF: {}", e),
         }
     }
-}

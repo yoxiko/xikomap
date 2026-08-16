@@ -1,4 +1,6 @@
+pub mod cors;
 pub mod dns_enumerator;
+pub mod favicon;
 pub mod geoip;
 pub mod grpc;
 pub mod http2_fingerprint;

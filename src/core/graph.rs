@@ -14,6 +14,8 @@ pub enum GraphNode {
     SecurityGrade { url: String, grade: String, score: u32, max_score: u32 },
     PtrRecord { ip: String, hostname: String },
     Screenshot { url: String, file_path: String, title: String },
+    Favicon { port: u16, hash: String, technology: Option<String> },
+    CorsIssue { url: String, severity: String, issues: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,28 +75,33 @@ impl ReconGraph {
             .collect()
     }
 
+    fn node_type(node: &GraphNode) -> &'static str {
+        match node {
+            GraphNode::Domain(_) => "domain",
+            GraphNode::Port { .. } => "port",
+            GraphNode::Service { .. } => "service",
+            GraphNode::Technology { .. } => "technology",
+            GraphNode::Subdomain(_) => "subdomain",
+            GraphNode::Vulnerability { .. } => "vulnerability",
+            GraphNode::SshService { .. } => "ssh_service",
+            GraphNode::JarmHash { .. } => "jarm_hash",
+            GraphNode::SecurityGrade { .. } => "security_grade",
+            GraphNode::PtrRecord { .. } => "ptr_record",
+            GraphNode::Screenshot { .. } => "screenshot",
+            GraphNode::Favicon { .. } => "favicon",
+            GraphNode::CorsIssue { .. } => "cors_issue",
+        }
+    }
+
     pub fn export_to_json(&self) -> Result<String, serde_json::Error> {
         let nodes: Vec<serde_json::Value> = self
             .graph
             .node_weights()
             .enumerate()
             .map(|(i, node)| {
-                let node_type = match node {
-                    GraphNode::Domain(_) => "domain",
-                    GraphNode::Port { .. } => "port",
-                    GraphNode::Service { .. } => "service",
-                    GraphNode::Technology { .. } => "technology",
-                    GraphNode::Subdomain(_) => "subdomain",
-                    GraphNode::Vulnerability { .. } => "vulnerability",
-                    GraphNode::SshService { .. } => "ssh_service",
-                    GraphNode::JarmHash { .. } => "jarm_hash",
-                    GraphNode::SecurityGrade { .. } => "security_grade",
-                    GraphNode::PtrRecord { .. } => "ptr_record",
-                    GraphNode::Screenshot { .. } => "screenshot",
-                };
                 serde_json::json!({
                     "id": i,
-                    "type": node_type,
+                    "type": Self::node_type(node),
                     "data": node,
                 })
             })
@@ -130,22 +137,10 @@ impl ReconGraph {
         xml.push_str("  <graph id=\"G\" edgedefault=\"directed\">\n");
 
         for (i, node) in self.graph.node_weights().enumerate() {
-            let node_type = match node {
-                GraphNode::Domain(_) => "domain",
-                GraphNode::Port { .. } => "port",
-                GraphNode::Service { .. } => "service",
-                GraphNode::Technology { .. } => "technology",
-                GraphNode::Subdomain(_) => "subdomain",
-                GraphNode::Vulnerability { .. } => "vulnerability",
-                GraphNode::SshService { .. } => "ssh_service",
-                GraphNode::JarmHash { .. } => "jarm_hash",
-                GraphNode::SecurityGrade { .. } => "security_grade",
-                GraphNode::PtrRecord { .. } => "ptr_record",
-                GraphNode::Screenshot { .. } => "screenshot",
-            };
             xml.push_str(&format!(
                 "    <node id=\"n{}\"><data key=\"d0\">{}</data></node>\n",
-                i, node_type
+                i,
+                Self::node_type(node)
             ));
         }
 

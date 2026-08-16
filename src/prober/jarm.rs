@@ -69,12 +69,11 @@ impl JarmScanner {
         };
 
         let probes = Self::build_probes();
-        let mut raw_responses = Vec::new();
 
-        for probe in &probes {
-            let response = Self::send_probe(&addr_str, probe).await;
-            raw_responses.push(response);
-        }
+        let raw_responses: Vec<String> = futures::future::join_all(
+            probes.iter().map(|probe| Self::send_probe(&addr_str, probe)),
+        )
+        .await;
 
         let concatenated = raw_responses.join("");
 
@@ -150,7 +149,7 @@ impl JarmScanner {
         hello_body.extend_from_slice(&cipher_bytes);
 
         hello_body.push(1);
-        hello_body.push(0); // compress null
+        hello_body.push(0);
 
         if probe.extensions {
             let mut extensions = Vec::new();
@@ -192,13 +191,13 @@ impl JarmScanner {
         }
 
         let mut handshake = Vec::new();
-        handshake.push(1); // ClientHello
+        handshake.push(1);
         let body_len = hello_body.len() as u32;
         handshake.extend_from_slice(&body_len.to_be_bytes()[1..4]);
         handshake.extend_from_slice(&hello_body);
 
         let mut record = Vec::new();
-        record.push(22); // handshake
+        record.push(22);
         record.extend_from_slice(&probe.tls_version.to_be_bytes());
         record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
         record.extend_from_slice(&handshake);
@@ -234,7 +233,7 @@ impl JarmScanner {
         let server_version = u16::from_be_bytes([hs[offset], hs[offset + 1]]);
         offset += 2;
 
-        offset += 32; // random
+        offset += 32;
         if offset >= hs.len() { return "000".to_string(); }
         let session_id_len = hs[offset] as usize;
         offset += 1 + session_id_len;

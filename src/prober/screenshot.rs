@@ -16,12 +16,7 @@ pub struct ScreenshotResult {
 pub struct ScreenshotCapture;
 
 impl ScreenshotCapture {
-    pub async fn capture(
-        url: &str,
-        output_dir: &str,
-        target_name: &str,
-        port: u16,
-    ) -> Option<ScreenshotResult> {
+    pub async fn launch() -> Option<Browser> {
         let browser_config = BrowserConfig::builder()
             .new_headless_mode()
             .no_sandbox()
@@ -34,7 +29,7 @@ impl ScreenshotCapture {
             .build()
             .ok()?;
 
-        let (mut browser, mut handler) = match Browser::launch(browser_config).await {
+        let (browser, mut handler) = match Browser::launch(browser_config).await {
             Ok(result) => result,
             Err(e) => {
                 debug!("Browser launch failed: {}", e);
@@ -42,17 +37,14 @@ impl ScreenshotCapture {
             }
         };
 
-        let _handler_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             while handler.next().await.is_some() {}
         });
 
-        let result = Self::capture_inner(&mut browser, url, output_dir, target_name, port).await;
-
-        let _ = browser.close().await;
-        result
+        Some(browser)
     }
 
-    async fn capture_inner(
+    pub async fn capture_with_browser(
         browser: &mut Browser,
         url: &str,
         output_dir: &str,
@@ -132,19 +124,5 @@ impl ScreenshotCapture {
                 None
             }
         }
-    }
-
-    pub async fn capture_multiple(
-        urls: &[(String, u16)],
-        output_dir: &str,
-        target_name: &str,
-    ) -> Vec<ScreenshotResult> {
-        let mut results = Vec::new();
-        for (url, port) in urls {
-            if let Some(result) = Self::capture(url, output_dir, target_name, *port).await {
-                results.push(result);
-            }
-        }
-        results
     }
 }

@@ -1,6 +1,8 @@
 use crate::core::graph::ReconGraph;
 use crate::detectors::api::ApiResult;
 use crate::detectors::cloud::CloudResult;
+use crate::prober::cors::CorsResult;
+use crate::prober::favicon::FaviconResult;
 use crate::prober::jarm::JarmResult;
 use crate::prober::rdns::PtrRecord;
 use crate::prober::screenshot::ScreenshotResult;
@@ -29,6 +31,8 @@ impl PdfReporter {
         jarm_results: &[JarmResult],
         security_results: &[SecurityHeadersResult],
         ptr_results: &[PtrRecord],
+        favicon_results: &[FaviconResult],
+        cors_results: &[CorsResult],
         screenshot_results: &[ScreenshotResult],
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -171,9 +175,10 @@ impl PdfReporter {
             11.0
         );
         let duration = end_time.signed_duration_since(start_time);
-        let minutes = duration.num_minutes();
-        let seconds = duration.num_seconds() % 60;
-        text_line!(&format!("Duration:   {}m {}s", minutes, seconds), 11.0);
+        text_line!(
+            &format!("Duration:   {}m {}s", duration.num_minutes(), duration.num_seconds() % 60),
+            11.0
+        );
         y -= 8.0;
 
         section_title!("Executive Summary");
@@ -182,6 +187,8 @@ impl PdfReporter {
         text_line!(&format!("SSH Services: {}", ssh_results.len()), 11.0);
         text_line!(&format!("JARM Fingerprints: {}", jarm_results.len()), 11.0);
         text_line!(&format!("Security Audits: {}", security_results.len()), 11.0);
+        text_line!(&format!("Favicon Matches: {}", favicon_results.len()), 11.0);
+        text_line!(&format!("CORS Issues: {}", cors_results.len()), 11.0);
         text_line!(&format!("PTR Records: {}", ptr_results.len()), 11.0);
         text_line!(
             &format!("Screenshots Captured: {}", screenshot_results.len()),
@@ -201,6 +208,21 @@ impl PdfReporter {
             .join(", ");
         text_line!(&ports_str, 11.0);
         y -= 8.0;
+
+        if !cors_results.is_empty() {
+            section_title!("CORS Misconfigurations");
+            for cors in cors_results {
+                bold_text_line!(
+                    &format!("{} - severity: {}", cors.url, cors.severity),
+                    11.0
+                );
+                for issue in &cors.issues {
+                    indent_text_line!(&format!("- {}", issue), 9.0);
+                }
+                y -= 3.0;
+            }
+            y -= 8.0;
+        }
 
         if !ptr_results.is_empty() {
             section_title!("Reverse DNS (PTR)");
@@ -228,15 +250,6 @@ impl PdfReporter {
                     };
                     indent_text_line!(&format!("KEX: {}", truncated), 8.0);
                 }
-                if !ssh.host_key_algorithms.is_empty() {
-                    let hk_str = ssh.host_key_algorithms.join(", ");
-                    let truncated = if hk_str.len() > 90 {
-                        format!("{}...", &hk_str[..90])
-                    } else {
-                        hk_str
-                    };
-                    indent_text_line!(&format!("Host Keys: {}", truncated), 8.0);
-                }
                 if !ssh.encryption_ciphers.is_empty() {
                     let enc_str = ssh.encryption_ciphers.join(", ");
                     let truncated = if enc_str.len() > 90 {
@@ -245,15 +258,6 @@ impl PdfReporter {
                         enc_str
                     };
                     indent_text_line!(&format!("Ciphers: {}", truncated), 8.0);
-                }
-                if !ssh.mac_algorithms.is_empty() {
-                    let mac_str = ssh.mac_algorithms.join(", ");
-                    let truncated = if mac_str.len() > 90 {
-                        format!("{}...", &mac_str[..90])
-                    } else {
-                        mac_str
-                    };
-                    indent_text_line!(&format!("MACs: {}", truncated), 8.0);
                 }
                 y -= 4.0;
             }
@@ -265,6 +269,22 @@ impl PdfReporter {
             for jarm in jarm_results {
                 bold_text_line!(&format!("Port {}:", jarm.port), 11.0);
                 mono_line!(&format!("  {}", jarm.hash), 9.0);
+            }
+            y -= 8.0;
+        }
+
+        if !favicon_results.is_empty() {
+            section_title!("Favicon Fingerprints");
+            for fav in favicon_results {
+                bold_text_line!(&format!("Port {} - hash {}", fav.port, fav.hash), 11.0);
+                if let Some(tech) = &fav.technology {
+                    indent_text_line!(&format!("Match: {}", tech), 9.0);
+                }
+                indent_text_line!(
+                    &format!("Shodan query: http.favicon.hash:{}", fav.hash),
+                    8.0
+                );
+                y -= 3.0;
             }
             y -= 8.0;
         }
@@ -299,10 +319,7 @@ impl PdfReporter {
                         } else {
                             check.value.clone()
                         };
-                        indent_text_line!(
-                            &format!("[OK] {}: {}", check.name, truncated),
-                            8.0
-                        );
+                        indent_text_line!(&format!("[OK] {}: {}", check.name, truncated), 8.0);
                     }
                 }
                 y -= 4.0;
@@ -374,19 +391,13 @@ impl PdfReporter {
 
         if !logs.is_empty() {
             section_title!("Full Scan Log");
-            text_line!(
-                &format!("Total log entries: {}", logs.len()),
-                10.0
-            );
+            text_line!(&format!("Total log entries: {}", logs.len()), 10.0);
             y -= 4.0;
 
             for entry in logs {
                 check_page!(18.0);
                 let timestamp = entry.timestamp.format("%H:%M:%S%.3f").to_string();
-                let line = format!(
-                    "[{}] [{}] {}",
-                    timestamp, entry.level, entry.message
-                );
+                let line = format!("[{}] [{}] {}", timestamp, entry.level, entry.message);
 
                 let max_chars = 110;
                 let line = if line.len() > max_chars {

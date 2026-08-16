@@ -1,6 +1,6 @@
 [package]
 name = "xikomap"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -32,6 +32,7 @@ indicatif = "0.17"
 regex = "1"
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 base64 = "0.22"
+murmur3 = "0.10"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 pnet = "0.34"

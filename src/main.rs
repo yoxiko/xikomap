@@ -753,3 +753,4 @@ async fn main() {
             Err(e) => error!("Failed to generate PDF: {}", e),
         }
     }
+}

@@ -338,6 +338,48 @@ async fn probe_port(
     PortReport { port, findings }
 }
 
+async fn capture_fallback(
+    client: &reqwest::Client,
+    url: &str,
+    output_dir: &str,
+    target_name: &str,
+    port: u16,
+) -> Option<ScreenshotResult> {
+    use crate::prober::screenshot::ScreenshotResult;
+    
+    let response = tokio::time::timeout(Duration::from_secs(10), client.get(url).send())
+        .await
+        .ok()?
+        .ok()?;
+
+    let status_code = Some(response.status().as_u16());
+    let final_url = response.url().to_string();
+    
+    let html = response.text().await.ok()?;
+    
+    let title = html
+        .find("<title>")
+        .and_then(|start| {
+            html[start + 7..]
+                .find("</title>")
+                .map(|end| html[start + 7..start + 7 + end].to_string())
+        })
+        .unwrap_or_else(|| format!("Port {}", port));
+
+    let file_name = format!("{}_{}_screenshot.html", target_name, port);
+    let file_path = format!("{}/{}", output_dir, file_name);
+    
+    std::fs::write(&file_path, html).ok()?;
+
+    Some(ScreenshotResult {
+        url: url.to_string(),
+        file_path,
+        status_code,
+        title,
+        final_url,
+    })
+}
+
 #[tokio::main]
 async fn main() {
     print_logo();
@@ -653,74 +695,100 @@ async fn main() {
         }
     }
 
-    if cli.screenshot {
-        let web_targets: Vec<(String, u16)> = if !open_ports.is_empty() {
-            info!("Preparing screenshots for {} open ports...", open_ports.len());
-            open_ports
-                .iter()
-                .map(|p| {
-                    let scheme = if TLS_PORTS.contains(p) || *p == 443 || *p == 8443 {
-                        "https"
-                    } else {
-                        "http"
-                    };
-                    (format_url(&target, *p, scheme), *p)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    if cli.screenshot && !open_ports.is_empty() {
+        info!("Preparing screenshots for {} open ports...", open_ports.len());
+        
+        let safe_name = target.replace(['.', ':', '/'], "_");
+        let screenshot_dir = "./screenshots";
+        std::fs::create_dir_all(screenshot_dir).ok();
 
-        if !web_targets.is_empty() {
-            info!("Launching headless browser for {} screenshots...", web_targets.len());
-            match ScreenshotCapture::launch().await {
-                Some(mut browser) => {
-                    for (url, port) in &web_targets {
-                        info!("Capturing screenshot for {} (port {})...", url, port);
-                        match ScreenshotCapture::capture_with_browser(
-                            &mut browser,
-                            url,
-                            "./screenshots",
-                            &target.replace(['.', ':', '/'], "_"),
-                            *port,
-                        )
-                        .await
-                        {
-                            Some(ss) => {
+        match ScreenshotCapture::launch().await {
+            Some(mut browser) => {
+                info!("Browser launched successfully, capturing {} screenshots...", open_ports.len());
+                
+                for port in &open_ports {
+                    let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
+                    let url = format_url(&target, *port, scheme);
+                    
+                    info!("Capturing screenshot for {} (port {})...", url, port);
+                    
+                    match ScreenshotCapture::capture_with_browser(
+                        &mut browser,
+                        &url,
+                        screenshot_dir,
+                        &safe_name,
+                        *port,
+                    )
+                    .await
+                    {
+                        Some(ss) => {
+                            info!(
+                                "{} Screenshot saved: {} (title: {})",
+                                "[+]".green().bold(),
+                                ss.file_path,
+                                ss.title
+                            );
+                            if let Some(pn) = port_nodes.get(port) {
+                                let ss_node = graph.add_node(GraphNode::Screenshot {
+                                    url: ss.url.clone(),
+                                    file_path: ss.file_path.clone(),
+                                    title: ss.title.clone(),
+                                });
+                                graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
+                            }
+                            all_screenshot_results.push(ss);
+                        }
+                        None => {
+                            warn!("Chrome failed for {} (port {}), trying HTTP fallback...", url, port);
+                            if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
                                 info!(
-                                    "{} Screenshot saved: {} (title: {})",
+                                    "{} HTTP fallback saved: {} (title: {})",
                                     "[+]".green().bold(),
-                                    ss.file_path,
-                                    ss.title
+                                    fallback_ss.file_path,
+                                    fallback_ss.title
                                 );
                                 if let Some(pn) = port_nodes.get(port) {
                                     let ss_node = graph.add_node(GraphNode::Screenshot {
-                                        url: ss.url.clone(),
-                                        file_path: ss.file_path.clone(),
-                                        title: ss.title.clone(),
+                                        url: fallback_ss.url.clone(),
+                                        file_path: fallback_ss.file_path.clone(),
+                                        title: fallback_ss.title.clone(),
                                     });
                                     graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
                                 }
-                                all_screenshot_results.push(ss);
-                            }
-                            None => {
-                                warn!("Failed to capture screenshot for {} (port {})", url, port);
+                                all_screenshot_results.push(fallback_ss);
                             }
                         }
                     }
-                    let _ = browser.close().await;
-                    info!(
-                        "Screenshots completed: {} successful",
-                        all_screenshot_results.len()
-                    );
                 }
-                None => {
-                    warn!("Failed to launch browser - Chrome/Chromium not installed or not in PATH");
-                    warn!("Install Chrome or Chromium to enable screenshot functionality");
-                }
+                let _ = browser.close().await;
+                info!("Screenshots completed: {} successful", all_screenshot_results.len());
             }
-        } else {
-            info!("No open ports found - skipping screenshots");
+            None => {
+                warn!("Chrome/Chromium not available, using HTTP fallback for all ports");
+                for port in &open_ports {
+                    let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
+                    let url = format_url(&target, *port, scheme);
+                    
+                    if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
+                        info!(
+                            "{} HTTP fallback saved: {} (title: {})",
+                            "[+]".green().bold(),
+                            fallback_ss.file_path,
+                            fallback_ss.title
+                        );
+                        if let Some(pn) = port_nodes.get(port) {
+                            let ss_node = graph.add_node(GraphNode::Screenshot {
+                                url: fallback_ss.url.clone(),
+                                file_path: fallback_ss.file_path.clone(),
+                                title: fallback_ss.title.clone(),
+                            });
+                            graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
+                        }
+                        all_screenshot_results.push(fallback_ss);
+                    }
+                }
+                info!("HTTP fallback completed: {} successful", all_screenshot_results.len());
+            }
         }
     }
 

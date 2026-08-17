@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 mod core;
 mod detectors;
 mod prober;
@@ -10,7 +13,6 @@ use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
 use crate::core::probing::{format_url, probe_port};
 use crate::detectors::api::ApiResult;
 use crate::detectors::cloud::{CloudDetector, CloudResult};
-use crate::detectors::fingerprinting::FingerprintingDetector;
 use crate::prober::cors::CorsResult;
 use crate::prober::dns_enumerator::DnsEnumerator;
 use crate::prober::favicon::FaviconResult;
@@ -120,7 +122,7 @@ async fn main() {
     let target_node = graph.add_node(GraphNode::Domain(target.clone()));
 
     let http_client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(15))
         .danger_accept_invalid_certs(true)
         .pool_max_idle_per_host(16)
         .build()

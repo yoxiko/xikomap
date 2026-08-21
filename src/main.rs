@@ -128,16 +128,23 @@ async fn main() -> Result<()> {
 
     if let Ok(dns_enum) = DnsEnumerator::new() {
         let subdomains = dns_enum.enumerate_subdomains(&target).await;
+        let txt_records = dns_enum.get_txt_records(&target).await;
+        let mx_records = dns_enum.get_mx_records(&target).await;
+        
         if !subdomains.is_empty() {
-            info!(
-                "{} Found {} subdomains",
-                "[+]".green().bold(),
-                subdomains.len()
-            );
+            info!("{} Found {} subdomains", "[+]".green().bold(), subdomains.len());
             for subdomain in subdomains.iter().take(10) {
                 let subdomain_node = graph.add_node(GraphNode::Domain(subdomain.clone()));
                 graph.add_edge(target_node, subdomain_node, GraphEdge::Related);
             }
+        }
+        
+        if !txt_records.is_empty() {
+            info!("{} Found {} TXT records", "[+]".green().bold(), txt_records.len());
+        }
+        
+        if !mx_records.is_empty() {
+            info!("{} Found {} MX records", "[+]".green().bold(), mx_records.len());
         }
     }
 
@@ -145,18 +152,18 @@ async fn main() -> Result<()> {
     if let Some(ip) = target_ip {
         if let Some(prober) = RdnsProber::new() {
             if let Some(ptr) = prober.lookup(&ip.to_string()).await {
-                info!(
-                    "{} PTR record: {} -> {}",
-                    "[+]".green().bold(),
-                    ptr.ip,
-                    ptr.hostname
-                );
+                info!("{} PTR record: {} -> {}", "[+]".green().bold(), ptr.ip, ptr.hostname);
                 let ptr_node = graph.add_node(GraphNode::PtrRecord {
                     ip: ptr.ip.clone(),
                     hostname: ptr.hostname.clone(),
                 });
                 graph.add_edge(target_node, ptr_node, GraphEdge::ResolvesTo);
                 all_ptr_results.push(ptr);
+            }
+            
+            let rdns_results = prober.lookup_multiple(&[ip.to_string()]).await;
+            if !rdns_results.records.is_empty() {
+                info!("{} rDNS lookup completed for {} IPs", "[+]".green().bold(), rdns_results.records.len());
             }
         }
     }
@@ -222,13 +229,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Finding::Ssh(ssh_fp) => {
-                    info!(
-                        "{} SSH: {} {} (banner: {})",
-                        "[+]".green().bold(),
-                        ssh_fp.software,
-                        ssh_fp.version,
-                        ssh_fp.banner
-                    );
+                    info!("{} SSH: {} {} (banner: {})", "[+]".green().bold(), ssh_fp.software, ssh_fp.version, ssh_fp.banner);
                     let node = graph.add_node(GraphNode::SshService {
                         port,
                         banner: ssh_fp.banner.clone(),
@@ -239,32 +240,14 @@ async fn main() -> Result<()> {
                     all_ssh_results.push(ssh_fp);
                 }
                 Finding::Jarm(jarm_res) => {
-                    let hash_preview = if jarm_res.hash.len() >= 16 {
-                        &jarm_res.hash[..16]
-                    } else {
-                        &jarm_res.hash
-                    };
-                    info!(
-                        "{} JARM: {} (port {})",
-                        "[+]".green().bold(),
-                        hash_preview,
-                        port
-                    );
-                    let node = graph.add_node(GraphNode::JarmHash {
-                        port,
-                        hash: jarm_res.hash.clone(),
-                    });
+                    let hash_preview = if jarm_res.hash.len() >= 16 { &jarm_res.hash[..16] } else { &jarm_res.hash };
+                    info!("{} JARM: {} (port {})", "[+]".green().bold(), hash_preview, port);
+                    let node = graph.add_node(GraphNode::JarmHash { port, hash: jarm_res.hash.clone() });
                     graph.add_edge(port_node, node, GraphEdge::Uses);
                     all_jarm_results.push(jarm_res);
                 }
                 Finding::Security(sec_res) => {
-                    info!(
-                        "{} Security Headers: grade {} ({}/{})",
-                        "[+]".green().bold(),
-                        sec_res.grade,
-                        sec_res.total_score,
-                        sec_res.max_total_score
-                    );
+                    info!("{} Security Headers: grade {} ({}/{})", "[+]".green().bold(), sec_res.grade, sec_res.total_score, sec_res.max_total_score);
                     let node = graph.add_node(GraphNode::SecurityGrade {
                         url: sec_res.url.clone(),
                         grade: sec_res.grade.clone(),
@@ -276,12 +259,7 @@ async fn main() -> Result<()> {
                 }
                 Finding::Favicon(fav_res) => {
                     if let Some(tech) = &fav_res.technology {
-                        info!(
-                            "{} Favicon: {} (hash {})",
-                            "[+]".green().bold(),
-                            tech,
-                            fav_res.hash
-                        );
+                        info!("{} Favicon: {} (hash {})", "[+]".green().bold(), tech, fav_res.hash);
                     } else {
                         info!("{} Favicon hash: {}", "[+]".green().bold(), fav_res.hash);
                     }
@@ -294,12 +272,7 @@ async fn main() -> Result<()> {
                     all_favicon_results.push(fav_res);
                 }
                 Finding::Cors(cors_res) => {
-                    warn!(
-                        "{} CORS misconfiguration on {} (severity: {})",
-                        "[!]".yellow().bold(),
-                        cors_res.url,
-                        cors_res.severity
-                    );
+                    warn!("{} CORS misconfiguration on {} (severity: {})", "[!]".yellow().bold(), cors_res.url, cors_res.severity);
                     let node = graph.add_node(GraphNode::CorsIssue {
                         url: cors_res.url.clone(),
                         severity: cors_res.severity.clone(),
@@ -330,6 +303,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some(openapi) = &all_api_results.openapi {
+        info!("{} OpenAPI URL: {}", "[+]".green().bold(), openapi.url);
+    }
+    if let Some(graphql) = &all_api_results.graphql {
+        info!("{} GraphQL Introspection: {}", "[+]".green().bold(), graphql.introspection);
+    }
+
     if cli.screenshot && !open_ports.is_empty() {
         info!("Preparing screenshots for {} open ports...", open_ports.len());
         let safe_name = target.replace(['.', ':', '/'], "_");
@@ -343,20 +323,9 @@ async fn main() -> Result<()> {
                     let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
                     let url = format_url(&target, *port, scheme);
                     info!("Capturing screenshot for {} (port {})...", url, port);
-                    match ScreenshotCapture::capture_with_browser(
-                        &mut browser,
-                        &url,
-                        screenshot_dir,
-                        &safe_name,
-                        *port,
-                    ).await {
+                    match ScreenshotCapture::capture_with_browser(&mut browser, &url, screenshot_dir, &safe_name, *port).await {
                         Some(ss) => {
-                            info!(
-                                "{} Screenshot saved: {} (title: {})",
-                                "[+]".green().bold(),
-                                ss.file_path,
-                                ss.title
-                            );
+                            info!("{} Screenshot saved: {} (title: {})", "[+]".green().bold(), ss.file_path, ss.title);
                             if let Some(pn) = port_nodes.get(port) {
                                 let ss_node = graph.add_node(GraphNode::Screenshot {
                                     url: ss.url.clone(),
@@ -370,12 +339,7 @@ async fn main() -> Result<()> {
                         None => {
                             warn!("Chrome failed for {} (port {}), trying HTTP fallback...", url, port);
                             if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
-                                info!(
-                                    "{} HTTP fallback saved: {} (title: {})",
-                                    "[+]".green().bold(),
-                                    fallback_ss.file_path,
-                                    fallback_ss.title
-                                );
+                                info!("{} HTTP fallback saved: {} (title: {})", "[+]".green().bold(), fallback_ss.file_path, fallback_ss.title);
                                 if let Some(pn) = port_nodes.get(port) {
                                     let ss_node = graph.add_node(GraphNode::Screenshot {
                                         url: fallback_ss.url.clone(),
@@ -398,12 +362,7 @@ async fn main() -> Result<()> {
                     let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
                     let url = format_url(&target, *port, scheme);
                     if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
-                        info!(
-                            "{} HTTP fallback saved: {} (title: {})",
-                            "[+]".green().bold(),
-                            fallback_ss.file_path,
-                            fallback_ss.title
-                        );
+                        info!("{} HTTP fallback saved: {} (title: {})", "[+]".green().bold(), fallback_ss.file_path, fallback_ss.title);
                         if let Some(pn) = port_nodes.get(port) {
                             let ss_node = graph.add_node(GraphNode::Screenshot {
                                 url: fallback_ss.url.clone(),
@@ -447,7 +406,7 @@ async fn main() -> Result<()> {
     if cli.export_pdf {
         let pdf_output = format!("{}_report.pdf", safe_target_name);
         let logs = get_log_collector()
-            .map(|c| c.entries())
+            .map(|c| c.drain())
             .unwrap_or_default();
         let concurrency = if cli.all { 1000 } else { 100 };
         if let Err(e) = pdf_reporter::PdfReporter::generate(

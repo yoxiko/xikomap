@@ -66,7 +66,7 @@ impl SynScanner {
         {
             let _ = ip;
             let _ = ports;
-            anyhow::bail!("SYN scan requires raw socket privileges. Use connect scan on Windows.");
+            anyhow::bail!("SYN scan requires raw socket privileges. Rate limit: {}, Timeout: {}ms. Use connect scan on Windows.", self.rate_limit, self.timeout_ms);
         }
         
         #[cfg(not(target_os = "windows"))]

@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 mod core;
 mod detectors;
 mod prober;
@@ -27,20 +24,20 @@ use crate::utils::cli::Cli;
 use crate::utils::logger::{get_log_collector, init_logger};
 use crate::utils::logo::print_logo;
 
+use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Parser;
 use colored::Colorize;
 use futures::StreamExt;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
-use std::process;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 const TLS_PORTS: [u16; 2] = [443, 8443];
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     print_logo();
     init_logger();
     let start_time = Utc::now();
@@ -66,13 +63,11 @@ async fn main() {
     info!("Starting advanced scan for target: {}", target);
     info!("Scan type: {}", scan_type_str);
 
-    let target_ip = match tokio::net::lookup_host(format!("{}:0", target)).await {
-        Ok(mut addrs) => addrs.next().map(|a| a.ip()),
-        Err(e) => {
-            error!("DNS resolution failed: {}", e);
-            process::exit(1);
-        }
-    };
+    let target_ip = tokio::net::lookup_host(format!("{}:0", target))
+        .await
+        .context("DNS resolution failed")?
+        .next()
+        .map(|a| a.ip());
 
     let open_ports = if cli.stealth {
         if let Some(ip) = target_ip {
@@ -81,35 +76,17 @@ async fn main() {
                 Err(e) => {
                     warn!("SYN scan unavailable: {}. Falling back to connect scan.", e);
                     let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
-                    match engine.run(&target, ports.clone()).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!("Scan failed: {}", e);
-                            process::exit(1);
-                        }
-                    }
+                    engine.run(&target, ports.clone()).await?
                 }
             }
         } else {
             warn!("Could not resolve target to IP for SYN scan. Falling back to connect scan.");
             let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
-            match engine.run(&target, ports.clone()).await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("Scan failed: {}", e);
-                    process::exit(1);
-                }
-            }
+            engine.run(&target, ports.clone()).await?
         }
     } else {
         let engine = ScannerEngine::new(if cli.all { 1000 } else { 100 });
-        match engine.run(&target, ports.clone()).await {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Scan failed: {}", e);
-                process::exit(1);
-            }
-        }
+        engine.run(&target, ports.clone()).await?
     };
 
     info!(
@@ -121,18 +98,12 @@ async fn main() {
     let mut graph = ReconGraph::new();
     let target_node = graph.add_node(GraphNode::Domain(target.clone()));
 
-    let http_client = match reqwest::Client::builder()
+    let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .danger_accept_invalid_certs(true)
         .pool_max_idle_per_host(16)
         .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create HTTP client: {}", e);
-            process::exit(1);
-        }
-    };
+        .context("Failed to create HTTP client")?;
 
     let mut all_cloud_results = CloudResult {
         services: Vec::new(),
@@ -152,7 +123,6 @@ async fn main() {
             "[+]".green().bold(),
             cloud_results.services
         );
-
         all_cloud_results = cloud_results;
     }
 
@@ -164,7 +134,6 @@ async fn main() {
                 "[+]".green().bold(),
                 subdomains.len()
             );
-
             for subdomain in subdomains.iter().take(10) {
                 let subdomain_node = graph.add_node(GraphNode::Domain(subdomain.clone()));
                 graph.add_edge(target_node, subdomain_node, GraphEdge::Related);
@@ -182,7 +151,6 @@ async fn main() {
                     ptr.ip,
                     ptr.hostname
                 );
-
                 let ptr_node = graph.add_node(GraphNode::PtrRecord {
                     ip: ptr.ip.clone(),
                     hostname: ptr.hostname.clone(),
@@ -236,7 +204,6 @@ async fn main() {
             match finding {
                 Finding::Service { name, detail } => {
                     info!("{} {}: {}", "[+]".green().bold(), name, detail);
-
                     let node = graph.add_node(GraphNode::Service {
                         port,
                         name: name.clone(),
@@ -245,13 +212,11 @@ async fn main() {
                 }
                 Finding::Technology { name, version } => {
                     info!("{} {}: {}", "[+]".green().bold(), name, version);
-
                     let node = graph.add_node(GraphNode::Technology {
                         name: name.clone(),
                         version: version.clone(),
                     });
                     graph.add_edge(port_node, node, GraphEdge::Uses);
-
                     if name != "TLS" && name != "HTTP/2" {
                         all_technologies.push((name, version));
                     }
@@ -264,7 +229,6 @@ async fn main() {
                         ssh_fp.version,
                         ssh_fp.banner
                     );
-
                     let node = graph.add_node(GraphNode::SshService {
                         port,
                         banner: ssh_fp.banner.clone(),
@@ -280,14 +244,12 @@ async fn main() {
                     } else {
                         &jarm_res.hash
                     };
-
                     info!(
                         "{} JARM: {} (port {})",
                         "[+]".green().bold(),
                         hash_preview,
                         port
                     );
-
                     let node = graph.add_node(GraphNode::JarmHash {
                         port,
                         hash: jarm_res.hash.clone(),
@@ -303,7 +265,6 @@ async fn main() {
                         sec_res.total_score,
                         sec_res.max_total_score
                     );
-
                     let node = graph.add_node(GraphNode::SecurityGrade {
                         url: sec_res.url.clone(),
                         grade: sec_res.grade.clone(),
@@ -324,7 +285,6 @@ async fn main() {
                     } else {
                         info!("{} Favicon hash: {}", "[+]".green().bold(), fav_res.hash);
                     }
-
                     let node = graph.add_node(GraphNode::Favicon {
                         port,
                         hash: fav_res.hash.clone(),
@@ -340,7 +300,6 @@ async fn main() {
                         cors_res.url,
                         cors_res.severity
                     );
-
                     let node = graph.add_node(GraphNode::CorsIssue {
                         url: cors_res.url.clone(),
                         severity: cors_res.severity.clone(),
@@ -351,7 +310,6 @@ async fn main() {
                 }
                 Finding::ApiOpenApi { title, version } => {
                     info!("{} OpenAPI: {} ({})", "[+]".green().bold(), title, version);
-
                     all_api_results.openapi = Some(crate::detectors::api::OpenApiSpec {
                         title,
                         version,
@@ -360,7 +318,6 @@ async fn main() {
                 }
                 Finding::ApiGraphql { url } => {
                     info!("{} GraphQL: {}", "[+]".green().bold(), url);
-
                     all_api_results.graphql = Some(crate::detectors::api::GraphQLInfo {
                         url,
                         introspection: false,
@@ -378,6 +335,7 @@ async fn main() {
         let safe_name = target.replace(['.', ':', '/'], "_");
         let screenshot_dir = "./screenshots";
         std::fs::create_dir_all(screenshot_dir).ok();
+        
         match ScreenshotCapture::launch().await {
             Some(mut browser) => {
                 info!("Browser launched successfully, capturing {} screenshots...", open_ports.len());
@@ -399,7 +357,6 @@ async fn main() {
                                 ss.file_path,
                                 ss.title
                             );
-
                             if let Some(pn) = port_nodes.get(port) {
                                 let ss_node = graph.add_node(GraphNode::Screenshot {
                                     url: ss.url.clone(),
@@ -419,7 +376,6 @@ async fn main() {
                                     fallback_ss.file_path,
                                     fallback_ss.title
                                 );
-
                                 if let Some(pn) = port_nodes.get(port) {
                                     let ss_node = graph.add_node(GraphNode::Screenshot {
                                         url: fallback_ss.url.clone(),
@@ -448,7 +404,6 @@ async fn main() {
                             fallback_ss.file_path,
                             fallback_ss.title
                         );
-
                         if let Some(pn) = port_nodes.get(port) {
                             let ss_node = graph.add_node(GraphNode::Screenshot {
                                 url: fallback_ss.url.clone(),
@@ -469,14 +424,12 @@ async fn main() {
 
     if cli.export_json {
         let json_output = format!("{}_graph.json", safe_target_name);
-        match json_reporter::export(&graph, &json_output) {
-            Ok(_) => info!("JSON saved to: {}", json_output),
-            Err(e) => error!("Failed to write JSON: {}", e),
+        if let Err(e) = json_reporter::export(&graph, &json_output) {
+            error!("Failed to write JSON: {}", e);
         }
         let graphml_output = format!("{}_graph.graphml", safe_target_name);
-        match graphml_reporter::export(&graph, &graphml_output) {
-            Ok(_) => info!("GraphML saved to: {}", graphml_output),
-            Err(e) => error!("Failed to write GraphML: {}", e),
+        if let Err(e) = graphml_reporter::export(&graph, &graphml_output) {
+            error!("Failed to write GraphML: {}", e);
         }
     }
 
@@ -497,7 +450,7 @@ async fn main() {
             .map(|c| c.entries())
             .unwrap_or_default();
         let concurrency = if cli.all { 1000 } else { 100 };
-        match pdf_reporter::PdfReporter::generate(
+        if let Err(e) = pdf_reporter::PdfReporter::generate(
             &graph,
             &target,
             &pdf_output,
@@ -519,10 +472,11 @@ async fn main() {
             end_time,
             &logs,
         ) {
-            Ok(_) => info!("PDF report saved to: {}", pdf_output),
-            Err(e) => error!("Failed to generate PDF: {}", e),
+            error!("Failed to generate PDF: {}", e);
         }
     }
+
+    Ok(())
 }
 
 async fn capture_fallback(
@@ -533,10 +487,8 @@ async fn capture_fallback(
     port: u16,
 ) -> Option<ScreenshotResult> {
     let resp = client.get(url).send().await.ok()?;
-
     let status_code = Some(resp.status().as_u16());
     let final_url = resp.url().to_string();
-
     let text = resp.text().await.ok()?;
 
     let title = text

@@ -10,14 +10,7 @@ use crate::core::graph::{GraphEdge, GraphNode, ReconGraph};
 use crate::core::probing::{format_url, probe_port};
 use crate::detectors::api::ApiResult;
 use crate::detectors::cloud::{CloudDetector, CloudResult};
-use crate::prober::cors::CorsResult;
-use crate::prober::dns_enumerator::DnsEnumerator;
-use crate::prober::favicon::FaviconResult;
-use crate::prober::jarm::JarmResult;
-use crate::prober::rdns::{PtrRecord, RdnsProber};
-use crate::prober::screenshot::{ScreenshotCapture, ScreenshotResult};
-use crate::prober::security_headers::SecurityHeadersResult;
-use crate::prober::ssh_fingerprint::SshFingerprint;
+use crate::prober::{CorsResult, FaviconResult, JarmResult, PtrRecord, ScreenshotResult, SecurityHeadersResult, SshFingerprint};
 use crate::reporter::{graphml_reporter, json_reporter, pdf_reporter};
 use crate::scanner::{ScannerEngine, SynScanner};
 use crate::utils::cli::Cli;
@@ -126,7 +119,7 @@ async fn main() -> Result<()> {
         all_cloud_results = cloud_results;
     }
 
-    if let Ok(dns_enum) = DnsEnumerator::new() {
+    if let Ok(dns_enum) = crate::prober::dns_enumerator::DnsEnumerator::new() {
         let subdomains = dns_enum.enumerate_subdomains(&target).await;
         let txt_records = dns_enum.get_txt_records(&target).await;
         let mx_records = dns_enum.get_mx_records(&target).await;
@@ -150,7 +143,7 @@ async fn main() -> Result<()> {
 
     let mut all_ptr_results: Vec<PtrRecord> = Vec::new();
     if let Some(ip) = target_ip {
-        if let Some(prober) = RdnsProber::new() {
+        if let Some(prober) = crate::prober::rdns::RdnsProber::new() {
             if let Some(ptr) = prober.lookup(&ip.to_string()).await {
                 info!("{} PTR record: {} -> {}", "[+]".green().bold(), ptr.ip, ptr.hostname);
                 let ptr_node = graph.add_node(GraphNode::PtrRecord {
@@ -284,9 +277,9 @@ async fn main() -> Result<()> {
                 Finding::ApiOpenApi { title, version } => {
                     info!("{} OpenAPI: {} ({})", "[+]".green().bold(), title, version);
                     all_api_results.openapi = Some(crate::detectors::api::OpenApiSpec {
-                        title,
-                        version,
                         url: String::new(),
+                        version,
+                        title,
                     });
                 }
                 Finding::ApiGraphql { url } => {
@@ -316,67 +309,23 @@ async fn main() -> Result<()> {
         let screenshot_dir = "./screenshots";
         std::fs::create_dir_all(screenshot_dir).ok();
         
-        match ScreenshotCapture::launch().await {
-            Some(mut browser) => {
-                info!("Browser launched successfully, capturing {} screenshots...", open_ports.len());
-                for port in &open_ports {
-                    let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
-                    let url = format_url(&target, *port, scheme);
-                    info!("Capturing screenshot for {} (port {})...", url, port);
-                    match ScreenshotCapture::capture_with_browser(&mut browser, &url, screenshot_dir, &safe_name, *port).await {
-                        Some(ss) => {
-                            info!("{} Screenshot saved: {} (title: {})", "[+]".green().bold(), ss.file_path, ss.title);
-                            if let Some(pn) = port_nodes.get(port) {
-                                let ss_node = graph.add_node(GraphNode::Screenshot {
-                                    url: ss.url.clone(),
-                                    file_path: ss.file_path.clone(),
-                                    title: ss.title.clone(),
-                                });
-                                graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
-                            }
-                            all_screenshot_results.push(ss);
-                        }
-                        None => {
-                            warn!("Chrome failed for {} (port {}), trying HTTP fallback...", url, port);
-                            if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
-                                info!("{} HTTP fallback saved: {} (title: {})", "[+]".green().bold(), fallback_ss.file_path, fallback_ss.title);
-                                if let Some(pn) = port_nodes.get(port) {
-                                    let ss_node = graph.add_node(GraphNode::Screenshot {
-                                        url: fallback_ss.url.clone(),
-                                        file_path: fallback_ss.file_path.clone(),
-                                        title: fallback_ss.title.clone(),
-                                    });
-                                    graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
-                                }
-                                all_screenshot_results.push(fallback_ss);
-                            }
-                        }
-                    }
+        for port in &open_ports {
+            let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
+            let url = format_url(&target, *port, scheme);
+            if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
+                info!("{} HTTP fallback saved: {} (title: {})", "[+]".green().bold(), fallback_ss.file_path, fallback_ss.title);
+                if let Some(pn) = port_nodes.get(port) {
+                    let ss_node = graph.add_node(GraphNode::Screenshot {
+                        url: fallback_ss.url.clone(),
+                        file_path: fallback_ss.file_path.clone(),
+                        title: fallback_ss.title.clone(),
+                    });
+                    graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
                 }
-                let _ = browser.close().await;
-                info!("Screenshots completed: {} successful", all_screenshot_results.len());
-            }
-            None => {
-                warn!("Chrome/Chromium not available, using HTTP fallback for all ports");
-                for port in &open_ports {
-                    let scheme = if TLS_PORTS.contains(port) { "https" } else { "http" };
-                    let url = format_url(&target, *port, scheme);
-                    if let Some(fallback_ss) = capture_fallback(&http_client, &url, screenshot_dir, &safe_name, *port).await {
-                        info!("{} HTTP fallback saved: {} (title: {})", "[+]".green().bold(), fallback_ss.file_path, fallback_ss.title);
-                        if let Some(pn) = port_nodes.get(port) {
-                            let ss_node = graph.add_node(GraphNode::Screenshot {
-                                url: fallback_ss.url.clone(),
-                                file_path: fallback_ss.file_path.clone(),
-                                title: fallback_ss.title.clone(),
-                            });
-                            graph.add_edge(*pn, ss_node, GraphEdge::HasScreenshot);
-                        }
-                        all_screenshot_results.push(fallback_ss);
-                    }
-                }
-                info!("HTTP fallback completed: {} successful", all_screenshot_results.len());
+                all_screenshot_results.push(fallback_ss);
             }
         }
+        info!("HTTP fallback completed: {} successful", all_screenshot_results.len());
     }
 
     let safe_target_name = target.replace(['.', '/', ':'], "_");
